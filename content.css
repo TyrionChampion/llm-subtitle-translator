@@ -1,0 +1,63 @@
+#llm-subtitle-overlay.llm-subtitle-overlay {
+  /* Position / sizing is set dynamically from JS based on the <video> rect —
+     fullscreen uses viewport coords, windowed tracks the video element. */
+  position: fixed !important;
+  right: auto !important;
+  top: auto !important;
+  transform: translateX(-50%) !important;
+  z-index: 2147483647 !important;
+  left: 50%;
+  bottom: 8vh;
+  max-width: 90vw;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  font-family: "PingFang SC", "Helvetica Neue", Helvetica, "Segoe UI", Arial, sans-serif;
+  text-align: center;
+  user-select: none;
+}
+
+#llm-subtitle-overlay .llm-subtitle-translated {
+  color: #fff;
+  font-size: 2.1rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-shadow:
+    -2px -2px 0 #000,
+    2px -2px 0 #000,
+    -2px 2px 0 #000,
+    2px 2px 0 #000,
+    0 0 6px rgba(0, 0, 0, 0.9);
+  padding: 0 8px;
+  white-space: pre-line;
+}
+
+#llm-subtitle-overlay .llm-subtitle-original {
+  color: #e8e8e8;
+  font-size: 1.35rem;
+  font-weight: 500;
+  line-height: 1.2;
+  opacity: 0.92;
+  text-shadow:
+    -1px -1px 0 #000,
+    1px -1px 0 #000,
+    -1px 1px 0 #000,
+    1px 1px 0 #000,
+    0 0 4px rgba(0, 0, 0, 0.9);
+  padding: 0 8px;
+  white-space: pre-line;
+}
+
+/* Compact sizing for smaller viewports */
+@media (max-width: 900px) {
+  #llm-subtitle-overlay .llm-subtitle-translated { font-size: 1.5rem; }
+  #llm-subtitle-overlay .llm-subtitle-original { font-size: 1rem; }
+}
+
+/* When page is in fullscreen, the overlay should still sit above the video */
+:fullscreen #llm-subtitle-overlay,
+:-webkit-full-screen #llm-subtitle-overlay {
+  bottom: 10vh;
+}

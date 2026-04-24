@@ -1,0 +1,81 @@
+{
+  "manifest_version": 3,
+  "name": "LLM Subtitle Translator",
+  "version": "1.1.0",
+  "description": "用 Gemini / OpenAI / Claude 实时翻译 Netflix、Disney+、YouTube、Prime Video 等流媒体的内置字幕。",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://*.netflix.com/*",
+    "https://*.disneyplus.com/*",
+    "https://*.hotstar.com/*",
+    "https://*.primevideo.com/*",
+    "https://*.amazon.com/*",
+    "https://*.youtube.com/*",
+    "https://*.hbomax.com/*",
+    "https://*.max.com/*",
+    "https://*.appletv.com/*",
+    "https://tv.apple.com/*",
+    "https://*.tver.jp/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://translation.googleapis.com/*",
+    "https://oauth2.googleapis.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Subtitle Translator",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.netflix.com/*",
+        "https://*.disneyplus.com/*",
+        "https://*.hotstar.com/*",
+        "https://*.primevideo.com/*",
+        "https://*.amazon.com/*",
+        "https://*.youtube.com/*",
+        "https://*.hbomax.com/*",
+        "https://*.max.com/*",
+        "https://tv.apple.com/*",
+        "https://*.tver.jp/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js"],
+      "matches": [
+        "https://*.netflix.com/*",
+        "https://*.disneyplus.com/*",
+        "https://*.hotstar.com/*",
+        "https://*.primevideo.com/*",
+        "https://*.amazon.com/*",
+        "https://*.youtube.com/*",
+        "https://*.hbomax.com/*",
+        "https://*.max.com/*",
+        "https://tv.apple.com/*",
+        "https://*.tver.jp/*"
+      ]
+    }
+  ]
+}

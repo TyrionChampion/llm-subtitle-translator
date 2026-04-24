@@ -1,0 +1,124 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --on: #16a34a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f2024;
+    --fg: #f3f4f6;
+    --muted: #9ca3af;
+    --border: #2e3238;
+    --accent: #3b82f6;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  width: 320px;
+  margin: 0;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+h1 {
+  font-size: 16px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 10px;
+}
+
+.row label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+select {
+  flex: 1;
+  max-width: 180px;
+  padding: 6px 8px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* Toggle switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.switch.small { width: 34px; height: 18px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  background: #9ca3af;
+  border-radius: 999px;
+  transition: background 0.15s;
+}
+.slider::before {
+  content: "";
+  position: absolute;
+  height: 16px; width: 16px;
+  left: 3px; top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.15s;
+}
+.switch.small .slider::before { height: 12px; width: 12px; }
+.switch input:checked + .slider { background: var(--on); }
+.switch input:checked + .slider::before { transform: translateX(18px); }
+.switch.small input:checked + .slider::before { transform: translateX(16px); }
+
+.status {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  min-height: 16px;
+}
+
+footer {
+  margin-top: 10px;
+  text-align: right;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 0;
+}
+.link:hover { text-decoration: underline; }

@@ -1,0 +1,481 @@
+// Service worker: handles LLM API calls so content scripts avoid CORS/key exposure.
+
+const DEFAULT_SETTINGS = {
+  provider: "gemini",
+  apiKey: "", // DEPRECATED; kept only so existing users' key isn't lost on upgrade
+  apiKeys: {
+    gemini: "",
+    openai: "",
+    anthropic: "",
+    "google-translate": "",
+    "google-translate-v3": "",
+    custom: "",
+  },
+  model: "", // DEPRECATED
+  models: {
+    gemini: "",
+    openai: "",
+    anthropic: "",
+    "google-translate": "",
+    "google-translate-v3": "",
+    custom: "",
+  },
+  googleProjectId: "",
+  googleLocation: "us-central1",
+  // Languages that should NOT be translated — if a cue's detected language
+  // falls into this list, the extension shows the original text as-is.
+  skipLanguages: ["简体中文", "繁體中文"],
+  targetLanguage: "简体中文",
+  showOriginal: true,
+  enabled: true,
+  customEndpoint: "",
+  temperature: 0.2,
+  batchSize: 3,
+  contextLines: 0,
+  debug: false,
+  fontFamily: "",
+  fontSize: 32,
+};
+
+const PROVIDER_DEFAULT_MODEL = {
+  gemini: "gemini-2.5-flash",
+  openai: "gpt-4o-mini",
+  anthropic: "claude-haiku-4-5-20251001",
+  custom: "",
+  "google-translate": "", // no model selection; Cloud Translation v2
+  "google-translate-v3": "general/translation-llm", // Gemini-backed NMT+
+};
+
+// Map from the user-facing display language to Google Translate ISO codes.
+// If the user types anything else (e.g. a raw ISO code), we pass it through.
+const GOOGLE_TRANSLATE_LANG = {
+  简体中文: "zh-CN",
+  繁體中文: "zh-TW",
+  English: "en",
+  日本語: "ja",
+  한국어: "ko",
+  "Español": "es",
+  "Français": "fr",
+  Deutsch: "de",
+  "Português": "pt",
+  "Русский": "ru",
+};
+
+function googleLangCode(target) {
+  if (!target) return "en";
+  const t = target.trim();
+  if (GOOGLE_TRANSLATE_LANG[t]) return GOOGLE_TRANSLATE_LANG[t];
+  // Already looks like an ISO code (en, zh-CN, ja-JP, pt-BR, etc.)
+  if (/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(t)) return t;
+  return "en";
+}
+
+async function getSettings() {
+  const stored = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+  return { ...DEFAULT_SETTINGS, ...stored };
+}
+
+function buildSystemPrompt(targetLanguage) {
+  return (
+    `Translate subtitles to ${targetLanguage}. Output the translation only, ` +
+    `no quotes or explanations. Keep it short. If multiple lines are joined ` +
+    `by '\\n---\\n', translate each and rejoin with the same delimiter.`
+  );
+}
+
+function buildContextBlock(history, targetLanguage) {
+  if (!history || history.length === 0) return "";
+  const lines = history
+    .map((h) => `- ${h.source}  →  ${h.translation}`)
+    .join("\n");
+  return `Recent translated lines (for tone and continuity, do NOT re-translate these):\n${lines}\n\nNow translate the following into ${targetLanguage}:\n`;
+}
+
+async function callGemini({ apiKey, model, system, user, temperature }) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model
+  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    systemInstruction: { parts: [{ text: system }] },
+    contents: [{ role: "user", parts: [{ text: user }] }],
+    generationConfig: {
+      temperature,
+      responseMimeType: "text/plain",
+    },
+  };
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Gemini ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts.map((p) => p.text || "").join("").trim();
+}
+
+async function callOpenAICompatible({
+  apiKey,
+  model,
+  system,
+  user,
+  temperature,
+  endpointOverride,
+}) {
+  const endpoint =
+    endpointOverride || "https://api.openai.com/v1/chat/completions";
+  const body = {
+    model,
+    temperature,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  };
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`OpenAI ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  return (data?.choices?.[0]?.message?.content || "").trim();
+}
+
+async function callGoogleTranslate({ apiKey, targetCode, lines }) {
+  const endpoint = `https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(
+    apiKey
+  )}`;
+  const body = {
+    q: lines,
+    target: targetCode,
+    format: "text",
+  };
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Google Translate ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const arr = data?.data?.translations || [];
+  return arr.map((t) => (t.translatedText || "").trim());
+}
+
+// --- Google Cloud OAuth2 JWT grant (for Translate v3) ---
+// The service worker keeps the most recent access token in memory and reuses
+// it until ~60s before expiry. Tokens last 1h; re-signing is cheap anyway.
+let v3TokenCache = null; // { accessToken, expiresAt, saFingerprint }
+
+function b64urlEncode(bytesOrString) {
+  const s =
+    typeof bytesOrString === "string"
+      ? btoa(unescape(encodeURIComponent(bytesOrString)))
+      : btoa(String.fromCharCode(...bytesOrString));
+  return s.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+function pemToPkcs8(pem) {
+  const body = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s+/g, "");
+  const raw = atob(body);
+  const buf = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+  return buf.buffer;
+}
+
+async function getV3AccessToken(serviceAccountJson) {
+  let sa;
+  try {
+    sa = JSON.parse(serviceAccountJson);
+  } catch (e) {
+    throw new Error(
+      "Service Account JSON 解析失败，请粘贴完整的 .json 文件内容。"
+    );
+  }
+  if (!sa.client_email || !sa.private_key) {
+    throw new Error(
+      "Service Account JSON 缺字段（需要 client_email / private_key）。"
+    );
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const fingerprint = `${sa.client_email}:${sa.private_key_id || ""}`;
+  if (
+    v3TokenCache &&
+    v3TokenCache.saFingerprint === fingerprint &&
+    v3TokenCache.expiresAt - 60 > now
+  ) {
+    return { accessToken: v3TokenCache.accessToken, projectId: sa.project_id };
+  }
+
+  const header = { alg: "RS256", typ: "JWT" };
+  const claim = {
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/cloud-translation",
+    aud: "https://oauth2.googleapis.com/token",
+    exp: now + 3600,
+    iat: now,
+  };
+  const signingInput = `${b64urlEncode(JSON.stringify(header))}.${b64urlEncode(
+    JSON.stringify(claim)
+  )}`;
+
+  const keyBuf = pemToPkcs8(sa.private_key);
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    keyBuf,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sigBuf = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(signingInput)
+  );
+  const jwt = `${signingInput}.${b64urlEncode(new Uint8Array(sigBuf))}`;
+
+  const tokRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body:
+      `grant_type=${encodeURIComponent(
+        "urn:ietf:params:oauth:grant-type:jwt-bearer"
+      )}&assertion=${encodeURIComponent(jwt)}`,
+  });
+  if (!tokRes.ok) {
+    const text = await tokRes.text();
+    throw new Error(
+      `OAuth2 token exchange ${tokRes.status}: ${text.slice(0, 300)}`
+    );
+  }
+  const tok = await tokRes.json();
+  v3TokenCache = {
+    accessToken: tok.access_token,
+    expiresAt: now + (tok.expires_in || 3600),
+    saFingerprint: fingerprint,
+  };
+  return { accessToken: tok.access_token, projectId: sa.project_id };
+}
+
+async function callGoogleTranslateV3({
+  serviceAccountJson,
+  projectIdOverride,
+  location,
+  model,
+  targetCode,
+  lines,
+}) {
+  const { accessToken, projectId: saProject } = await getV3AccessToken(
+    serviceAccountJson
+  );
+  const projectId = projectIdOverride || saProject;
+  if (!projectId) {
+    throw new Error(
+      "Project ID 未知（Service Account JSON 里没有 project_id，也未手动填写）。"
+    );
+  }
+  const loc = location || "us-central1";
+  const endpoint = `https://translation.googleapis.com/v3/projects/${encodeURIComponent(
+    projectId
+  )}/locations/${encodeURIComponent(loc)}:translateText`;
+  const body = {
+    contents: lines,
+    targetLanguageCode: targetCode,
+    mimeType: "text/plain",
+  };
+  const m = (model || "").trim();
+  if (m) {
+    body.model = m.startsWith("projects/")
+      ? m
+      : `projects/${projectId}/locations/${loc}/models/${m}`;
+  }
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `Google Translate v3 ${res.status}: ${text.slice(0, 300)}`
+    );
+  }
+  const data = await res.json();
+  const arr = data?.translations || [];
+  return arr.map((t) => (t.translatedText || "").trim());
+}
+
+async function callAnthropic({ apiKey, model, system, user, temperature }) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1024,
+      temperature,
+      system,
+      messages: [{ role: "user", content: user }],
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const parts = data?.content || [];
+  return parts
+    .filter((p) => p.type === "text")
+    .map((p) => p.text)
+    .join("")
+    .trim();
+}
+
+async function translate({ lines, history }) {
+  const settings = await getSettings();
+  const apiKey =
+    settings.apiKeys?.[settings.provider] || settings.apiKey || "";
+  if (!apiKey) {
+    throw new Error(
+      `${settings.provider} 的 API key 未设置，请先在扩展选项里填写。`
+    );
+  }
+
+  // Google Translate has a totally different shape (no prompt, takes an
+  // array of strings, returns an array of strings), so we short-circuit.
+  if (settings.provider === "google-translate") {
+    const targetCode = googleLangCode(settings.targetLanguage);
+    const translations = await callGoogleTranslate({
+      apiKey,
+      targetCode,
+      lines,
+    });
+    if (translations.length === lines.length) return translations;
+    return lines.map((_, i) => translations[i] || "");
+  }
+  if (settings.provider === "google-translate-v3") {
+    const targetCode = googleLangCode(settings.targetLanguage);
+    const model =
+      settings.models?.["google-translate-v3"] ||
+      PROVIDER_DEFAULT_MODEL["google-translate-v3"];
+    const translations = await callGoogleTranslateV3({
+      // For v3 we store the Service Account JSON in the per-provider apiKey slot.
+      serviceAccountJson: apiKey,
+      projectIdOverride: settings.googleProjectId || "",
+      location: settings.googleLocation || "us-central1",
+      model,
+      targetCode,
+      lines,
+    });
+    if (translations.length === lines.length) return translations;
+    return lines.map((_, i) => translations[i] || "");
+  }
+
+  const model =
+    settings.models?.[settings.provider] ||
+    settings.model ||
+    PROVIDER_DEFAULT_MODEL[settings.provider];
+  const system = buildSystemPrompt(settings.targetLanguage);
+  const contextBlock = buildContextBlock(history, settings.targetLanguage);
+  const user = `${contextBlock}${lines.join("\n---\n")}`;
+
+  const common = {
+    apiKey,
+    model,
+    system,
+    user,
+    temperature: Number(settings.temperature) || 0.2,
+  };
+
+  let output;
+  switch (settings.provider) {
+    case "gemini":
+      output = await callGemini(common);
+      break;
+    case "openai":
+      output = await callOpenAICompatible(common);
+      break;
+    case "anthropic":
+      output = await callAnthropic(common);
+      break;
+    case "custom":
+      if (!settings.customEndpoint) {
+        throw new Error("自定义 provider 需要填写 endpoint URL。");
+      }
+      output = await callOpenAICompatible({
+        ...common,
+        endpointOverride: settings.customEndpoint,
+      });
+      break;
+    default:
+      throw new Error(`未知 provider: ${settings.provider}`);
+  }
+
+  const parts = output.split(/\n---\n/);
+  if (parts.length === lines.length) return parts.map((s) => s.trim());
+  // Single-cue path: no delimiter needed, output is the translation as-is.
+  if (lines.length === 1) return [output.trim()];
+  // Multi-cue batch where the model didn't respect our delimiter: we can't
+  // safely reassign output lines to inputs (the old byLine fallback happily
+  // treated untranslated source lines as "translations"). Return empty so
+  // the retry timer re-dispatches these cues individually.
+  return lines.map(() => "");
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === "translate") {
+    translate({ lines: msg.lines, history: msg.history })
+      .then((translations) => sendResponse({ ok: true, translations }))
+      .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
+    return true; // async
+  }
+  if (msg?.type === "getSettings") {
+    getSettings().then((s) => sendResponse(s));
+    return true;
+  }
+  if (msg?.type === "setSettings") {
+    chrome.storage.sync.set(msg.patch || {}).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg?.type === "ping") {
+    sendResponse({ ok: true });
+    return false;
+  }
+});
+
+chrome.runtime.onInstalled.addListener(async () => {
+  const current = await chrome.storage.sync.get(null);
+  const merged = { ...DEFAULT_SETTINGS, ...current };
+  // Ensure the per-provider objects exist and include every known provider
+  // (even if older builds stored a subset).
+  merged.apiKeys = { ...DEFAULT_SETTINGS.apiKeys, ...(merged.apiKeys || {}) };
+  merged.models = { ...DEFAULT_SETTINGS.models, ...(merged.models || {}) };
+  // Migration: if the user had a single `apiKey` / `model` from a previous
+  // build, carry it into the current provider's slot so they don't lose it.
+  const p = merged.provider;
+  if (p && merged.apiKey && !merged.apiKeys[p]) merged.apiKeys[p] = merged.apiKey;
+  if (p && merged.model && !merged.models[p]) merged.models[p] = merged.model;
+  await chrome.storage.sync.set(merged);
+});

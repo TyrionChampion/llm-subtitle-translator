@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Subtitle Translator · 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>LLM Subtitle Translator</h1>
+      <p class="lead">
+        用大语言模型把 Netflix / Disney+ / Prime Video / YouTube 等平台的字幕实时翻译成你看得懂的语言。
+      </p>
+
+      <section class="card">
+        <h2>1. 翻译后端</h2>
+        <div class="row">
+          <label>Provider</label>
+          <select id="provider">
+            <option value="gemini">Google Gemini</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic Claude</option>
+            <option value="google-translate">Google Translate v2 (NMT)</option>
+            <option value="google-translate-v3">Google Translate v3 (LLM / Advanced)</option>
+            <option value="custom">自定义 (OpenAI 兼容)</option>
+          </select>
+        </div>
+
+        <!-- LLM block: Gemini / OpenAI / Anthropic / custom -->
+        <div class="provider-block" id="llmBlock">
+          <div class="row">
+            <label>API Key</label>
+            <div class="input-with-button">
+              <input id="apiKey" type="password" placeholder="留空则无法工作" />
+              <button id="toggleApiKey" type="button" class="ghost" title="显示/隐藏">
+                显示
+              </button>
+            </div>
+            <small class="hint">每个后端保存各自的 key，切换 provider 不会覆盖。</small>
+          </div>
+          <div class="row">
+            <label>模型</label>
+            <input id="model" type="text" placeholder="留空则使用默认模型" />
+            <small id="modelHint" class="hint"></small>
+          </div>
+          <div class="row" id="customRow" hidden>
+            <label>自定义 Endpoint</label>
+            <input
+              id="customEndpoint"
+              type="url"
+              placeholder="https://your-proxy.example.com/v1/chat/completions"
+            />
+          </div>
+          <div class="row">
+            <label>Temperature</label>
+            <input id="temperature" type="number" step="0.1" min="0" max="2" />
+          </div>
+        </div>
+
+        <!-- Google Translate v2 block: just an API Key -->
+        <div class="provider-block" id="v2Block" hidden>
+          <div class="row">
+            <label>API Key</label>
+            <div class="input-with-button">
+              <input id="apiKeyV2" type="password" placeholder="留空则无法工作" />
+              <button id="toggleApiKeyV2" type="button" class="ghost" title="显示/隐藏">
+                显示
+              </button>
+            </div>
+            <small class="hint">
+              Google Cloud Console → APIs &amp; Services → Credentials → Create credentials → API Key。
+              确保已启用 Cloud Translation API。
+            </small>
+          </div>
+        </div>
+
+        <!-- Google Translate v3 block: completely separate from LLM settings -->
+        <div class="provider-block" id="v3Block" hidden>
+          <div class="subblock-heading">Google Translate v3 专属设置</div>
+          <div class="row">
+            <label>Service Account JSON</label>
+            <div class="input-with-button">
+              <textarea
+                id="saJson"
+                rows="6"
+                placeholder="粘贴完整的 .json 内容"
+              ></textarea>
+              <button id="toggleSaJson" type="button" class="ghost" title="显示/隐藏">
+                显示
+              </button>
+            </div>
+            <small class="hint">
+              v3 不支持 API Key（会报 401）。需要 Service Account：IAM &amp; Admin → Service Accounts
+              新建一个，授予 <code>Cloud Translation API User</code> 角色，Keys → Add Key →
+              Create new key → JSON，把下载的文件内容整个粘进来。扩展本地用 Web Crypto 签 JWT 换
+              access token，JSON 只存在 <code>chrome.storage.sync</code> 里。
+            </small>
+          </div>
+          <div class="row">
+            <label>Project ID</label>
+            <input id="googleProjectId" type="text" placeholder="留空则使用 SA JSON 里的 project_id" />
+          </div>
+          <div class="row">
+            <label>Location</label>
+            <input id="googleLocation" type="text" placeholder="us-central1" />
+            <small class="hint">
+              用 <code>translation-llm</code> 时必须是 <code>us-central1</code>；普通 NMT 可用 <code>global</code>。
+            </small>
+          </div>
+          <div class="row">
+            <label>模型</label>
+            <input id="modelV3" type="text" placeholder="general/translation-llm" />
+            <small class="hint">
+              默认 <code>general/translation-llm</code>（Gemini 驱动，质量最好）；也可填
+              <code>general/nmt</code>，或完整路径 <code>projects/…/models/…</code>。
+            </small>
+          </div>
+        </div>
+
+        <button id="testBtn" class="primary">测试连接</button>
+        <span id="testStatus" class="inline-status"></span>
+      </section>
+
+      <section class="card">
+        <h2>2. 翻译行为</h2>
+        <div class="row">
+          <label>目标语言</label>
+          <input id="targetLanguage" type="text" placeholder="如: 简体中文 / English / 日本語" />
+        </div>
+        <div class="row">
+          <label>上下文行数</label>
+          <input id="contextLines" type="number" min="0" max="20" />
+          <small class="hint">发送给模型的最近翻译行数，用于保持语气和代词一致。</small>
+        </div>
+        <div class="row">
+          <label>同时显示原文</label>
+          <label class="switch">
+            <input id="showOriginal" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="row">
+          <label>启用扩展</label>
+          <label class="switch">
+            <input id="enabled" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="row">
+          <label>调试日志</label>
+          <label class="switch">
+            <input id="debug" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+          <small class="hint">打开后在视频页面 DevTools Console 会看到 <code>[subtitle-translator]</code> 日志，用于排查没检测到字幕的情况。</small>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3. 不翻译的语言</h2>
+        <p class="hint">
+          字幕被识别为下列语言时，直接显示原文、不调用翻译 API（省钱、省延迟）。点击常用语言加入列表；或在底部输入框添加自定义。
+        </p>
+        <div class="row">
+          <label>当前列表</label>
+          <div class="chip-list" id="skipChips"></div>
+        </div>
+        <div class="row">
+          <label>常用</label>
+          <div class="preset-list" id="skipPresets">
+            <button type="button" class="ghost preset" data-lang="简体中文">简体中文</button>
+            <button type="button" class="ghost preset" data-lang="繁體中文">繁體中文</button>
+            <button type="button" class="ghost preset" data-lang="English">English</button>
+            <button type="button" class="ghost preset" data-lang="日本語">日本語</button>
+            <button type="button" class="ghost preset" data-lang="한국어">한국어</button>
+            <button type="button" class="ghost preset" data-lang="Русский">Русский</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>自定义</label>
+          <div class="input-with-button">
+            <input id="skipLangCustom" type="text" placeholder="语言名称，回车或点「添加」确认，如 Italiano" />
+            <button id="skipLangAdd" type="button" class="ghost">添加</button>
+          </div>
+          <small class="hint">
+            扩展按字符集自动识别（CJK / 假名 / Hangul / 西里尔字母 / 拉丁字母）。自定义条目只对扩展能识别出的语言生效；
+            大多数拉丁语族（英、西、法、德、葡、意…）会统一被识别为 <code>English</code>，此时仅加 English 即可。
+          </small>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>4. 译文样式</h2>
+        <div class="row">
+          <label>字体</label>
+          <input
+            id="fontFamily"
+            type="text"
+            placeholder="如: PingFang SC, Helvetica, sans-serif（留空使用默认）"
+          />
+          <small class="hint">填任意 CSS font-family 值。留空则使用系统默认。</small>
+        </div>
+        <div class="row">
+          <label>字号 (px)</label>
+          <input id="fontSize" type="number" min="12" max="96" />
+          <small class="hint">
+            以 1080p 视频为基准自动等比缩放——4K 全屏约 2 倍，720p 窗口约 0.67 倍。
+          </small>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3. 使用说明</h2>
+        <ol class="steps">
+          <li>在 Chrome 地址栏打开 <code>chrome://extensions</code>，开启「开发者模式」。</li>
+          <li>点击「加载已解压的扩展程序」，选择这个项目文件夹。</li>
+          <li>拿到 Gemini / OpenAI / Claude 的 API Key 填在上面，点「测试连接」。</li>
+          <li>打开 Netflix / Disney+ / Prime Video / YouTube 播放视频，在平台内先把原文字幕开起来（比如英文字幕）。</li>
+          <li>扩展会隐藏原生字幕并在底部覆盖翻译版本，可选同时显示原文。</li>
+        </ol>
+        <p class="hint">
+          翻译是通过大模型完成的，会产生 API 调用费用；建议使用 Gemini flash / gpt-4o-mini / claude-haiku 等成本低的模型。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>4. 支持的平台</h2>
+        <ul class="platforms">
+          <li>Netflix</li>
+          <li>Disney+ / Hotstar</li>
+          <li>Prime Video</li>
+          <li>YouTube</li>
+          <li>HBO Max / Max</li>
+          <li>Apple TV+</li>
+        </ul>
+      </section>
+
+      <div id="saveStatus" class="save-status"></div>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>
