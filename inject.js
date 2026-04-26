@@ -45,6 +45,10 @@
     if (/<tt[\s>]/i.test(head)) return true;
     if (/<ttml/i.test(head)) return true;
     if (/<\?xml[^>]*>\s*<tt[\s>]/i.test(head)) return true;
+    // YouTube formats
+    if (/<\?xml[^>]*>\s*<transcript/i.test(head)) return true; // srv1 XML
+    if (head.startsWith("<transcript")) return true;
+    if (/^\s*\{\s*"(wireMagic|events)"/.test(head)) return true; // json3
     return false;
   }
 

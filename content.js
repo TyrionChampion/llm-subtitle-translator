@@ -113,7 +113,7 @@
 
   // Unconditional load banner so the user can verify injection from devtools.
   // Bump this when shipping a fix so the user can confirm the new code landed.
-  const BUILD = "2026-04-24.27-font-autoscale";
+  const BUILD = "2026-04-26.2-youtube-pretranslate";
   console.log(
     `${DEBUG_PREFIX} content script loaded (build ${BUILD}) on ${HOST} ` +
       `(platform=${platform.name}, frame=${window.top === window ? "top" : "sub"})`
@@ -799,6 +799,56 @@
     return out;
   }
 
+  // YouTube srv1 XML: <transcript><text start="..." dur="...">...</text></transcript>
+  function parseYouTubeXML(text) {
+    const out = [];
+    let doc;
+    try {
+      doc = new DOMParser().parseFromString(text, "text/xml");
+    } catch (_) {
+      return out;
+    }
+    const els = doc.getElementsByTagName("text");
+    for (const el of els) {
+      const start = parseFloat(el.getAttribute("start") || "");
+      const dur = parseFloat(el.getAttribute("dur") || "0");
+      if (!isFinite(start)) continue;
+      const txt = (el.textContent || "")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .trim();
+      if (txt) out.push({ start, end: start + (dur || 2), text: txt });
+    }
+    return out;
+  }
+
+  // YouTube json3: { events: [{ tStartMs, dDurationMs, segs: [{utf8}] }, ...] }
+  function parseYouTubeJSON3(text) {
+    const out = [];
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (_) {
+      return out;
+    }
+    const events = data?.events || [];
+    for (const ev of events) {
+      const start = (ev.tStartMs || 0) / 1000;
+      const dur = (ev.dDurationMs || 0) / 1000;
+      const segs = ev.segs || [];
+      const txt = segs
+        .map((s) => s.utf8 || "")
+        .join("")
+        .trim();
+      // YouTube emits timing-keyframe events with empty text — skip them.
+      if (txt && dur > 0) out.push({ start, end: start + dur, text: txt });
+    }
+    return out;
+  }
+
   function ingestParsedCues(cues) {
     if (!cues.length) return 0;
     let added = 0;
@@ -934,6 +984,16 @@
       const langMatch =
         text.match(/xml:lang="([^"]+)"/i) || text.match(/\slang="([^"]+)"/i);
       const display = langMatch ? langCodeToDisplay(langMatch[1]) : null;
+      if (display) setSessionLanguage(display);
+    } else if (/^\s*\{\s*"(wireMagic|events)"/.test(text)) {
+      cues = parseYouTubeJSON3(text);
+    } else if (/<transcript/i.test(text.slice(0, 200))) {
+      cues = parseYouTubeXML(text);
+    }
+    // YouTube embeds the source language in the timedtext URL (`&lang=ja` etc.)
+    if (!sessionLanguage && d.url) {
+      const m = d.url.match(/[?&]lang=([a-zA-Z-]+)/);
+      const display = m ? langCodeToDisplay(m[1]) : null;
       if (display) setSessionLanguage(display);
     }
     if (cues.length) {
