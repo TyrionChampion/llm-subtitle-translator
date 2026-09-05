@@ -4,7 +4,7 @@
 
 ## 工作原理
 
-1. 内容脚本 (`content.js`) 注入到播放页面，用 `MutationObserver` 监听平台自身的字幕 DOM 节点。
+1. 内容脚本 (`content.js`) 注入到播放页面，轮询平台字幕 DOM；Apple TV 优先读取用户已开启的原生 TextTrack 字幕。
 2. 每次字幕文本变化，脚本把原文通过 `chrome.runtime.sendMessage` 发给 Service Worker。
 3. Service Worker (`background.js`) 调用你配置好的 LLM（Gemini / OpenAI / Anthropic / 自定义 OpenAI 兼容 endpoint）返回翻译。
 4. 脚本把翻译后的文字叠在视频底部，并可选同时显示原文。
@@ -19,6 +19,22 @@
 5. 选择 provider、填入 API Key、选目标语言
 6. 点「测试连接」确认能返回翻译
 7. 打开 Netflix / Disney+ 等，**先在平台里把原文字幕（例如英文）打开**，扩展就会自动接管
+
+### Apple TV
+
+支持影视播放页、`/sporting-event/` 体育回放页，以及从频道页弹窗打开的直播。频道页仅在播放弹窗打开时启用翻译，不翻译普通预览视频。先在播放器字幕菜单中选择原文语言（例如 English CC）；扩展不会自动打开或切换字幕轨道。
+
+Apple TV 的原生字幕和字幕菜单会保留，插件只补充译文，不重复显示同一份原文。译文挂载在播放器的模态弹窗内部，避免被浏览器顶层遮挡。若播放器没有暴露可读取的原生 cue 或字幕 DOM，本扩展无法从画面中识别字幕，也不解密媒体。
+
+播放时最多提前翻译未来约 30 秒内已加载的字幕；预翻译与当前字幕共用请求和缓存，失败后等待重试，避免整片字幕一次性调用 API。
+
+### 开发测试
+
+使用 Node.js 18+ 运行无需 API Key、网络或额外依赖的回归测试：
+
+```sh
+node --test tests/*.test.cjs
+```
 
 ## 文件结构
 

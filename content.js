@@ -103,7 +103,8 @@
       case "max":
         return /\/(video\/watch|player)\//.test(path);
       case "appletv":
-        return /\/(movie|show|episode|watch)\//.test(path);
+        return /\/(movie|show|episode|watch|sporting-event)\//.test(path) ||
+          !!findPlaybackDialog(getMainVideo());
       case "tver":
         return /\/(episodes|live|lives|series)\//.test(path);
       default:
@@ -113,7 +114,7 @@
 
   // Unconditional load banner so the user can verify injection from devtools.
   // Bump this when shipping a fix so the user can confirm the new code landed.
-  const BUILD = "2026-04-26.2-youtube-pretranslate";
+  const BUILD = "2026-09-05-appletv-native-tracks";
   console.log(
     `${DEBUG_PREFIX} content script loaded (build ${BUILD}) on ${HOST} ` +
       `(platform=${platform.name}, frame=${window.top === window ? "top" : "sub"})`
@@ -122,6 +123,7 @@
   // Inject the MAIN-world subtitle capture script as early as possible so it
   // can patch fetch/XHR before the player issues subtitle requests.
   (function injectCaptureScript() {
+    if (platform.name === "appletv") return; // Native TextTracks are the source of truth.
     try {
       const s = document.createElement("script");
       s.src = chrome.runtime.getURL("inject.js");
@@ -153,6 +155,9 @@
   const cueLibrary = new Map();
   let cueList = []; // sorted by start time
   let lastCueCaptureAt = 0;
+  let sessionGeneration = 0;
+  let selectedTrackLanguage = "";
+  let lastNativeScanAt = 0;
 
   function log(...args) {
     if (settings?.debug) console.log(DEBUG_PREFIX, ...args);
@@ -250,8 +255,21 @@
     );
   }
 
+  function findPlaybackDialog(video) {
+    for (let node = video; node; node = node.parentElement || node.getRootNode?.()?.host) {
+      if (node.tagName === "DIALOG" && node.open) return node;
+    }
+    return null;
+  }
+
+  function overlayTarget() {
+    // showModal() puts Apple's playback dialog in the browser's top layer.
+    // No z-index on a sibling under <html> can paint above that dialog.
+    return findPlaybackDialog(getMainVideo()) || fullscreenTarget() || document.documentElement;
+  }
+
   function ensureOverlay() {
-    const target = fullscreenTarget() || document.documentElement;
+    const target = overlayTarget();
     if (
       overlay &&
       overlay.isConnected &&
@@ -278,7 +296,7 @@
   // Re-home the overlay whenever fullscreen state changes.
   function onFullscreenChange() {
     if (!overlay) return;
-    const target = fullscreenTarget() || document.documentElement;
+    const target = overlayTarget();
     if (overlay.parentElement !== target) {
       target.appendChild(overlay);
     }
@@ -293,6 +311,8 @@
   // overlay would otherwise stick to the page bottom.
   function positionOverlayToVideo() {
     if (!overlay) return;
+    const target = overlayTarget();
+    if (overlay.parentElement !== target) target.appendChild(overlay);
     const videos = getVideos();
     const v =
       videos.find((x) => !x.paused && x.readyState >= 2) || videos[0];
@@ -362,8 +382,12 @@
     // hide the original row so the same line isn't shown twice.
     const duplicated =
       currentTranslated && currentTranslated === currentOriginal;
+    // Apple's native English CC stays visible. A second English row in our
+    // overlay wastes space and pushes the Chinese row up over the native text.
+    const nativeOriginalVisible = platform.name === "appletv" &&
+      !!globalThis.LLMSubtitleReader.readNative(v).text;
     oEl.style.display =
-      settings.showOriginal && currentOriginal && !duplicated
+      settings.showOriginal && currentOriginal && !duplicated && !nativeOriginalVisible
         ? "block"
         : "none";
     // Always hide the native subtitle while enabled — our overlay is the
@@ -376,6 +400,14 @@
   function hideNativeSubtitles(on) {
     const styleId = "llm-subtitle-hide-native";
     let el = document.getElementById(styleId);
+    // Apple TV uses broad subtitle/caption class names for both rendered cues
+    // and its subtitle settings UI. Hiding those selectors also makes the
+    // language menu disappear, so keep Apple's native English captions visible
+    // and only add our translated overlay on top.
+    if (platform.name === "appletv") {
+      if (el) el.remove();
+      return;
+    }
     if (!on) {
       if (el) el.remove();
       return;
@@ -456,8 +488,9 @@
       }
     }
     // Prefer innermost matches only (drop any element that contains another match).
-    const leaves = all.filter((el) =>
-      !all.some((other) => other !== el && el.contains(other))
+    const eligible = all.filter(el => globalThis.LLMSubtitleReader.isSubtitleElement(el));
+    const leaves = eligible.filter((el) =>
+      !eligible.some((other) => other !== el && el.contains(other))
     );
     // Keep only leaves that are visible AND painted over a <video> region.
     const videos = getVideos();
@@ -580,7 +613,55 @@
     // "scan anything near the video" fallback was catching UI chrome like
     // the Netflix "Skip Intro" button, title overlays, up-next countdowns,
     // etc. — anything inside the player container with visible text.
+    if (platform.name === "appletv") {
+      const native = globalThis.LLMSubtitleReader.readNative(getMainVideo());
+      if (native.available) return native.text;
+    }
     return findByPlatformSelectors();
+  }
+
+  function getMainVideo() {
+    const videos = getVideos();
+    return videos.find(v => findPlaybackDialog(v)) ||
+      videos.find(v => !v.paused && v.readyState >= 2) || videos[0];
+  }
+
+  function languageKey(lang) {
+    const key = String(lang || "").toLowerCase().split(/[-_]/)[0];
+    return ({ eng: "en", spa: "es", zho: "zh", chi: "zh", jpn: "ja", und: "" })[key] ?? key;
+  }
+
+  // Native TextTrack timings already use video.currentTime. Pre-translate only
+  // the next 30 seconds of the selected track, without changing its mode.
+  function scanNativeCues(video) {
+    const native = globalThis.LLMSubtitleReader.readNative(video);
+    const selection = native.available ? languageKey(native.language) || "selected" : "off";
+    if (selection !== selectedTrackLanguage) {
+      selectedTrackLanguage = selection;
+      cueLibrary.clear();
+      cueList = [];
+      sessionGeneration++;
+      pending.clear();
+      currentOriginal = "";
+      currentTranslated = "";
+      lastNativeScanAt = 0;
+      renderOverlay();
+    }
+    if (!video || Date.now() - lastNativeScanAt < 1000) return native;
+    lastNativeScanAt = Date.now();
+    const upcoming = [];
+    for (const track of Array.from(video.textTracks || [])) {
+      if (track.mode !== "showing" || !["subtitles", "captions"].includes(track.kind)) continue;
+      for (const cue of Array.from(track.cues || [])) {
+        if (cue.endTime <= video.currentTime || cue.startTime > video.currentTime + 30) continue;
+        const text = globalThis.LLMSubtitleReader.cueText(cue);
+        upcoming.push({ start: cue.startTime, end: cue.endTime, text,
+          language: track.language });
+        if (upcoming.length >= 100) break;
+      }
+    }
+    ingestParsedCues(upcoming);
+    return native;
   }
 
   // -------------- translation --------------
@@ -589,6 +670,8 @@
   }
 
   async function translateText(text) {
+    if (!settings?.enabled || !isPlayerPage()) return "";
+    const generation = sessionGeneration;
     const key = normalize(text);
     if (!key) return "";
     if (cache.has(key)) return cache.get(key);
@@ -610,6 +693,7 @@
           history: historySlice,
         },
         (resp) => {
+          if (generation !== sessionGeneration || !settings?.enabled) { resolve(""); return; }
           const dt = Date.now() - t0;
           if (chrome.runtime.lastError) {
             console.error(
@@ -654,11 +738,12 @@
       );
     });
     pending.set(key, promise);
-    promise.finally(() => pending.delete(key));
+    promise.finally(() => { if (pending.get(key) === promise) pending.delete(key); });
     return promise;
   }
 
   async function handleCueChange(text) {
+    const generation = sessionGeneration;
     // Safety: if the same cue has been on screen way longer than any real
     // subtitle, clear it. Disney+ occasionally leaves stale cue DOM around.
     if (
@@ -709,13 +794,15 @@
     }
     lastTranslationAt = Date.now();
 
+    if (generation !== sessionGeneration || text !== currentOriginal || !settings?.enabled) return;
+
     const captured = text;
     const translation = await translateText(text);
     // Strict sync: only show the translation if the cue is still on screen.
     // If it already ended, discard — resurrecting a finished cue would leave
     // stale text on top of the next line. The cache has been filled either
     // way, so the same text reappearing later shows instantly.
-    if (captured === currentOriginal) {
+    if (captured === currentOriginal && generation === sessionGeneration && settings?.enabled) {
       currentTranslated = translation;
       renderOverlay();
     }
@@ -746,11 +833,11 @@
       const start = parseTimeVTT(m[1]);
       const end = parseTimeVTT(m[2]);
       if (!isFinite(start) || !isFinite(end)) continue;
-      const content = lines
-        .slice(tli + 1)
-        .join("\n")
-        .replace(/<[^>]+>/g, "")
-        .trim();
+      // Match native cue cleanup so e.g. &gt;&gt; and >> share one cache/API
+      // request instead of being translated twice via network and TextTrack.
+      const content = globalThis.LLMSubtitleReader.cueText({
+        text: lines.slice(tli + 1).join("\n"),
+      });
       if (content) out.push({ start, end, text: content });
     }
     return out;
@@ -850,10 +937,15 @@
   }
 
   function ingestParsedCues(cues) {
-    if (!cues.length) return 0;
+    if (!settings?.enabled || !isPlayerPage() || !cues.length) return 0;
     let added = 0;
-    for (const c of cues) {
-      const key = `${c.start.toFixed(3)}|${c.end.toFixed(3)}|${c.text.slice(0, 32)}`;
+    for (const c of cues.slice(0, 4096)) {
+      if (!Number.isFinite(c.start) || !Number.isFinite(c.end) || c.end <= c.start ||
+          typeof c.text !== "string" || !c.text.trim() || c.text.length > 4000) continue;
+      const lang = languageKey(c.language);
+      if (platform.name === "appletv" && (selectedTrackLanguage === "off" ||
+          (lang && selectedTrackLanguage !== "selected" && lang !== selectedTrackLanguage))) continue;
+      const key = `${c.start.toFixed(3)}|${c.end.toFixed(3)}|${c.text}`;
       if (cueLibrary.has(key)) continue;
       cueLibrary.set(key, {
         start: c.start,
@@ -861,7 +953,9 @@
         text: c.text,
         translation: null,
         translating: false,
+        retryAt: 0,
       });
+      if (cueLibrary.size > 2000) cueLibrary.delete(cueLibrary.keys().next().value);
       added++;
     }
     if (added) {
@@ -874,12 +968,11 @@
 
   let batchSchedulerRunning = false;
   async function scheduleBatchTranslation() {
-    if (batchSchedulerRunning) return;
+    if (batchSchedulerRunning || !settings?.enabled || !isPlayerPage()) return;
     batchSchedulerRunning = true;
+    const generation = sessionGeneration;
     try {
-      // Keep draining while new cues keep being captured.
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
+      while (settings?.enabled && generation === sessionGeneration && isPlayerPage()) {
         // Don't waste API calls on cues in the skip-translation list.
         // Mark them as "translated" with their source text so time-sync /
         // cache hits display them immediately.
@@ -889,75 +982,23 @@
             cache.set(normalize(c.text), c.text);
           }
         }
-        const pool = cueList.filter(
-          (c) => c.translation === null && !c.translating
-        );
+        const video = getMainVideo();
+        if (!video || video.paused || !Number.isFinite(video.currentTime)) break;
+        const now = video.currentTime;
+        const pool = cueList.filter(c => c.translation === null && !c.translating &&
+          c.retryAt <= Date.now() && c.end > now && c.start <= now + 30)
+          .sort((a, b) => a.start - b.start).slice(0, 2);
         if (!pool.length) break;
-        const videos = getVideos();
-        const cur =
-          videos.find((v) => !v.paused && v.readyState >= 2) || videos[0];
-        const now = cur ? cur.currentTime : 0;
-        pool.sort((a, b) => {
-          const da = a.start >= now ? a.start - now : now - a.start + 1e6;
-          const db = b.start >= now ? b.start - now : now - b.start + 1e6;
-          return da - db;
-        });
-        const MAX_CONCURRENT = 3;
-        // One cue per API call — no delimiter, no parser ambiguity. With
-        // 3 concurrent workers this still burns through the queue quickly.
-        const BATCH_SIZE = 1;
-        const workers = [];
-        let idx = 0;
-        for (let w = 0; w < MAX_CONCURRENT; w++) {
-          workers.push(
-            (async () => {
-              while (idx < pool.length) {
-                const myIdx = idx;
-                idx += BATCH_SIZE;
-                const batch = pool.slice(myIdx, myIdx + BATCH_SIZE);
-                if (!batch.length) break;
-                batch.forEach((c) => (c.translating = true));
-                const lines = batch.map((c) => c.text);
-                const t0 = Date.now();
-                const translations = await new Promise((resolve) => {
-                  chrome.runtime.sendMessage(
-                    { type: "translate", lines, history: [] },
-                    (resp) => {
-                      if (resp?.ok) resolve(resp.translations);
-                      else {
-                        console.error(
-                          DEBUG_PREFIX,
-                          "batch translation failed:",
-                          resp?.error
-                        );
-                        resolve(lines.map(() => ""));
-                      }
-                    }
-                  );
-                });
-                const dt = Date.now() - t0;
-                let filled = 0;
-                batch.forEach((c, i) => {
-                  const tr = translations[i] || "";
-                  c.translating = false;
-                  if (tr) {
-                    c.translation = tr;
-                    cache.set(normalize(c.text), tr);
-                    filled++;
-                  } else {
-                    // Leave as null so the next scheduler pass retries.
-                    c.translation = null;
-                  }
-                });
-                console.log(
-                  DEBUG_PREFIX,
-                  `batch translated ${filled}/${batch.length} cues in ${dt}ms`
-                );
-              }
-            })()
-          );
-        }
-        await Promise.all(workers);
+        // Same pending/cache path as live cues, so a prefetch and a visible cue
+        // cannot charge twice for the same text. Failures back off, not spin.
+        await Promise.all(pool.map(async c => {
+          c.translating = true;
+          try {
+            const translated = await translateText(c.text);
+            if (generation === sessionGeneration) c.translation = translated || null;
+            c.retryAt = Date.now() + 15000;
+          } finally { c.translating = false; }
+        }));
       }
     } finally {
       batchSchedulerRunning = false;
@@ -972,7 +1013,8 @@
     if (e.origin && e.origin !== location.origin) return;
     const d = e.data;
     if (!d || d.source !== "__llm-subtitle-capture") return;
-    if (typeof d.text !== "string") return;
+    if (!settings?.enabled || !isPlayerPage() || platform.name === "appletv") return;
+    if (typeof d.text !== "string" || d.text.length > 8 * 1024 * 1024) return;
     const text = String(d.text || "");
     let cues = [];
     if (text.startsWith("WEBVTT")) cues = parseWebVTT(text);
@@ -1084,11 +1126,14 @@
     }
     const playingVideos = videos.filter((v) => !v.paused && v.readyState >= 2);
     const translatedCount = cueList.filter((c) => c.translation !== null).length;
+    const trackInfo = videos.flatMap(v => Array.from(v.textTracks || []).map(t =>
+      `${t.kind}/${t.language}/${t.mode}:cues=${t.cues?.length ?? "unavailable"},active=${t.activeCues?.length ?? "unavailable"}`));
     console.log(
       DEBUG_PREFIX,
       `diag: videos=${videos.length} playing=${playingVideos.length} ` +
         `platformMatches=[${platformMatches.join("; ") || "none"}] ` +
         `capturedCues=${cueList.length} preTranslated=${translatedCount} ` +
+        `tracks=[${trackInfo.join("; ")}] ` +
         `lastCapture=${lastCueCaptureAt ? `${Math.round((Date.now() - lastCueCaptureAt) / 1000)}s ago` : "never"} ` +
         `lastCue=${JSON.stringify(currentOriginal || "")}`
     );
@@ -1097,17 +1142,15 @@
   function startObserving() {
     stopObserving();
     const check = () => {
-      // DOM is authoritative for what's on screen right now; cueLibrary only
-      // pre-warms the text cache in the background.
-      const text = extractSubtitle();
-      handleCueChange(text);
+      if (platform.name === "appletv") scanNativeCues(getMainVideo());
+      handleCueChange(extractSubtitle());
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.
       positionOverlayToVideo();
     };
     // Poll-based detection is more reliable than MutationObserver for
     // shadow DOM / React-rebuilt nodes that many players use.
-    pollTimer = setInterval(check, 200);
+    pollTimer = setInterval(check, platform.name === "appletv" ? 100 : 200);
     check();
     console.log(DEBUG_PREFIX, "observer started; platform =", platform.name);
     // One diagnostic dump every 3 seconds for the first 15 seconds so the
@@ -1150,7 +1193,14 @@
   }
 
   async function applySettings() {
+    sessionGeneration++;
     await loadSettings();
+    cache.clear();
+    pending.clear();
+    history.length = 0;
+    cueLibrary.clear();
+    cueList = [];
+    lastNativeScanAt = 0;
     const active = !!settings?.enabled && isPlayerPage();
     hideNativeSubtitles(active);
     if (active) startObserving();
@@ -1174,12 +1224,18 @@
       cueList = [];
       lastCueCaptureAt = 0;
       sessionLanguage = null; // new video may be a different language
+      selectedTrackLanguage = "";
       console.log(
         DEBUG_PREFIX,
         `navigation detected (${location.pathname}); re-evaluating`
       );
       // Re-decide whether this URL is a player page; Netflix browse → /watch/
       // and back should toggle the observer on/off accordingly.
+      applySettings();
+    } else if (platform.name === "appletv" && settings &&
+        (!!pollTimer !== (!!settings.enabled && isPlayerPage()))) {
+      // Live broadcasts can open/close a modal on /channel/ without changing
+      // the URL. Reconcile player state as well as SPA route changes.
       applySettings();
     }
   }, 1000);
