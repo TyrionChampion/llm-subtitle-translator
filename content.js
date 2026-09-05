@@ -114,7 +114,7 @@
 
   // Unconditional load banner so the user can verify injection from devtools.
   // Bump this when shipping a fix so the user can confirm the new code landed.
-  const BUILD = "2026-09-05-appletv-native-tracks";
+  const BUILD = "2026-09-05-f1-context-fork";
   console.log(
     `${DEBUG_PREFIX} content script loaded (build ${BUILD}) on ${HOST} ` +
       `(platform=${platform.name}, frame=${window.top === window ? "top" : "sub"})`
@@ -142,6 +142,7 @@
   let currentTranslated = "";
   const cache = new Map();
   const history = [];
+  const sourceTimeline = globalThis.LLMTranslationContext.createTimeline();
   const HISTORY_MAX = 12;
   const pending = new Map();
   let lastTranslationAt = 0;
@@ -638,6 +639,7 @@
     const selection = native.available ? languageKey(native.language) || "selected" : "off";
     if (selection !== selectedTrackLanguage) {
       selectedTrackLanguage = selection;
+      sourceTimeline.reset();
       cueLibrary.clear();
       cueList = [];
       sessionGeneration++;
@@ -650,16 +652,19 @@
     if (!video || Date.now() - lastNativeScanAt < 1000) return native;
     lastNativeScanAt = Date.now();
     const upcoming = [];
+    const contextCues = [];
     for (const track of Array.from(video.textTracks || [])) {
       if (track.mode !== "showing" || !["subtitles", "captions"].includes(track.kind)) continue;
       for (const cue of Array.from(track.cues || [])) {
-        if (cue.endTime <= video.currentTime || cue.startTime > video.currentTime + 30) continue;
+        if (cue.endTime < video.currentTime - 120 || cue.startTime > video.currentTime + 30) continue;
         const text = globalThis.LLMSubtitleReader.cueText(cue);
-        upcoming.push({ start: cue.startTime, end: cue.endTime, text,
-          language: track.language });
-        if (upcoming.length >= 100) break;
+        const record = { start: cue.startTime, end: cue.endTime, text,
+          language: track.language, nativeTiming: true };
+        contextCues.push(record);
+        if (cue.endTime > video.currentTime && upcoming.length < 100) upcoming.push(record);
       }
     }
+    sourceTimeline.add(contextCues);
     ingestParsedCues(upcoming);
     return native;
   }
@@ -669,11 +674,21 @@
     return text.replace(/\s+/g, " ").trim();
   }
 
-  async function translateText(text) {
+  function translationProfile() {
+    return globalThis.LLMTranslationContext.profile(settings?.translationMode,
+      location.href, document.title);
+  }
+
+  async function translateText(text, cue = null) {
     if (!settings?.enabled || !isPlayerPage()) return "";
     const generation = sessionGeneration;
-    const key = normalize(text);
-    if (!key) return "";
+    const normalized = normalize(text);
+    if (!normalized) return "";
+    const profile = translationProfile();
+    const sourceContext = profile === "f1"
+      ? sourceTimeline.before(text, getMainVideo()?.currentTime, cue?.nativeTiming ? cue.start : undefined,
+        settings.f1ContextLines ?? 4) : [];
+    const key = profile === "f1" ? JSON.stringify([profile, normalized, sourceContext]) : normalized;
     if (cache.has(key)) return cache.get(key);
     if (pending.has(key)) return pending.get(key);
 
@@ -685,12 +700,15 @@
     const t0 = Date.now();
     const promise = new Promise((resolve) => {
       const n = Math.max(0, settings?.contextLines ?? 0);
-      const historySlice = n > 0 ? history.slice(-n) : [];
+      const historySlice = profile !== "f1" && n > 0 ? history.slice(-n) : [];
+      log("translation context", { profile, sourceLines: sourceContext.length });
       chrome.runtime.sendMessage(
         {
           type: "translate",
           lines,
           history: historySlice,
+          translationProfile: profile,
+          sourceContext,
         },
         (resp) => {
           if (generation !== sessionGeneration || !settings?.enabled) { resolve(""); return; }
@@ -744,6 +762,11 @@
 
   async function handleCueChange(text) {
     const generation = sessionGeneration;
+    const video = getMainVideo();
+    if (translationProfile() === "f1" &&
+        (platform.name !== "appletv" || !globalThis.LLMSubtitleReader.readNative(video).available)) {
+      sourceTimeline.observe(text, video?.currentTime);
+    }
     // Safety: if the same cue has been on screen way longer than any real
     // subtitle, clear it. Disney+ occasionally leaves stale cue DOM around.
     if (
@@ -954,6 +977,7 @@
         translation: null,
         translating: false,
         retryAt: 0,
+        nativeTiming: c.nativeTiming === true,
       });
       if (cueLibrary.size > 2000) cueLibrary.delete(cueLibrary.keys().next().value);
       added++;
@@ -994,7 +1018,7 @@
         await Promise.all(pool.map(async c => {
           c.translating = true;
           try {
-            const translated = await translateText(c.text);
+            const translated = await translateText(c.text, c);
             if (generation === sessionGeneration) c.translation = translated || null;
             c.retryAt = Date.now() + 15000;
           } finally { c.translating = false; }
@@ -1198,6 +1222,9 @@
     cache.clear();
     pending.clear();
     history.length = 0;
+    sourceTimeline.reset();
+    currentOriginal = "";
+    currentTranslated = "";
     cueLibrary.clear();
     cueList = [];
     lastNativeScanAt = 0;

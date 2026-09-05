@@ -9,6 +9,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const Reader = require("../subtitle-reader.js");
+const TranslationContext = require("../translation-context.js");
 const source = fs.readFileSync(path.join(__dirname, "../content.js"), "utf8");
 
 const videoRect = { left: 0, top: 0, right: 1920, bottom: 1080, width: 1920, height: 1080 };
@@ -59,11 +60,11 @@ class Element {
 
 async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
 
-async function harness({ enabled = true, cues = [], time = 10, autoResponse = false, dialogOpen = false, showOriginal = false, youtube = false, channel = false } = {}) {
+async function harness({ enabled = true, cues = [], time = 10, autoResponse = false, dialogOpen = false, showOriginal = false, youtube = false, channel = false, title = "", translationMode = "auto", f1ContextLines = 4 } = {}) {
   let now = 10000, nextTimer = 1;
   const intervals = new Map(), timeouts = new Map(), listeners = new Map();
   const requests = [], logs = [], storageListeners = [];
-  let settings = { enabled, showOriginal, contextLines: 0, skipLanguages: [], fontSize: 32 };
+  let settings = { enabled, showOriginal, contextLines: 0, skipLanguages: [], fontSize: 32, translationMode, f1ContextLines };
   const html = new Element("html"), body = new Element("body"), player = new Element("div");
   const video = new Element("video");
   const track = { mode: "showing", kind: "captions", language: "en", cues, activeCues: [] };
@@ -78,7 +79,7 @@ async function harness({ enabled = true, cues = [], time = 10, autoResponse = fa
   }
   if (dialogOpen) openDialog();
   const document = {
-    nodeType: 9, children: [html], documentElement: html, body,
+    nodeType: 9, children: [html], documentElement: html, body, title,
     querySelectorAll: (selector) => html.querySelectorAll(selector),
     getElementById: (id) => html.querySelector("#" + id),
     createElement: (tag) => new Element(tag), addEventListener() {},
@@ -87,7 +88,7 @@ async function harness({ enabled = true, cues = [], time = 10, autoResponse = fa
   if (channel) Object.assign(location, { href: "https://tv.apple.com/us/channel/formula-1/test", pathname: "/us/channel/formula-1/test" });
   if (youtube) Object.assign(location, { href: "https://www.youtube.com/watch?v=test", pathname: "/watch", hostname: "www.youtube.com", origin: "https://www.youtube.com" });
   const context = {
-    document, location, LLMSubtitleReader: Reader, innerWidth: 1920, innerHeight: 1080,
+    document, location, LLMSubtitleReader: Reader, LLMTranslationContext: TranslationContext, innerWidth: 1920, innerHeight: 1080,
     console: { log: (...args) => logs.push(args), error: (...args) => logs.push(args), warn: (...args) => logs.push(args) },
     Date: class extends Date { static now() { return now; } },
     getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1", fontSize: "32px" }),
@@ -159,6 +160,34 @@ async function harness({ enabled = true, cues = [], time = 10, autoResponse = fa
 }
 
 const nativeCue = (text, startTime = 10, endTime = 12) => ({ text, startTime, endTime });
+
+test("F1 uses preceding source cues and shares the current prefetch request", async () => {
+  const h = await harness({ title: "F1 Italy Practice", cues: [
+    nativeCue("First source", 6, 8), nativeCue("Second source", 8, 10),
+    nativeCue("Current source", 10, 12), nativeCue("Future source", 12, 14),
+  ] });
+  assert.equal(h.requests.length, 2);
+  const current = h.requests.find(r => r.message.lines[0] === "Current source").message;
+  assert.equal(current.translationProfile, "f1");
+  assert.deepEqual(Array.from(current.sourceContext), ["First source", "Second source"]);
+  assert.equal(current.history.length, 0);
+  await h.respond(1, "未来译文");
+  await h.respond(0, "当前译文");
+  h.video.currentTime = 12.5;
+  await h.poll(1000);
+  assert.equal(h.requests.length, 2, "source order is independent of response completion order");
+  assert.equal(h.translated(), "未来译文");
+});
+
+test("F1 context resets across track changes and off mode keeps ordinary behavior", async () => {
+  const h = await harness({ title: "F1", cues: [nativeCue("Old English", 8, 10), nativeCue("Now", 10, 12)] });
+  h.track.language = "es";
+  h.track.cues = [nativeCue("Nuevo", 10, 12)];
+  await h.poll(1000);
+  assert.deepEqual(Array.from(h.requests.at(-1).message.sourceContext), []);
+  const off = await harness({ title: "F1", translationMode: "off", cues: [nativeCue("Now")] });
+  assert.equal(off.requests[0].message.translationProfile, "general");
+});
 
 test("channel-page live modal starts translation and stops when closed without URL navigation", async () => {
   const h = await harness({ channel: true, cues: [nativeCue("Live English CC")] });

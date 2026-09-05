@@ -1,4 +1,5 @@
 // Service worker: handles LLM API calls so content scripts avoid CORS/key exposure.
+import "./translation-context.js";
 
 const DEFAULT_SETTINGS = {
   provider: "gemini",
@@ -32,6 +33,8 @@ const DEFAULT_SETTINGS = {
   temperature: 0.2,
   batchSize: 3,
   contextLines: 0,
+  translationMode: "auto",
+  f1ContextLines: 4,
   debug: false,
   fontFamily: "",
   fontSize: 32,
@@ -75,11 +78,12 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...stored };
 }
 
-function buildSystemPrompt(targetLanguage) {
+function buildSystemPrompt(targetLanguage, f1 = false) {
   return (
     `Translate subtitles to ${targetLanguage}. Output the translation only, ` +
     `no quotes or explanations. Keep it short. If multiple lines are joined ` +
-    `by '\\n---\\n', translate each and rejoin with the same delimiter.`
+    `by '\\n---\\n', translate each and rejoin with the same delimiter.` +
+    (f1 ? "\n" + globalThis.LLMTranslationContext.f1Prompt(targetLanguage) : "")
   );
 }
 
@@ -353,7 +357,7 @@ async function callAnthropic({ apiKey, model, system, user, temperature }) {
     .trim();
 }
 
-async function translate({ lines, history }) {
+async function translate({ lines, history, translationProfile, sourceContext }) {
   const settings = await getSettings();
   const apiKey =
     settings.apiKeys?.[settings.provider] || settings.apiKey || "";
@@ -397,8 +401,12 @@ async function translate({ lines, history }) {
     settings.models?.[settings.provider] ||
     settings.model ||
     PROVIDER_DEFAULT_MODEL[settings.provider];
-  const system = buildSystemPrompt(settings.targetLanguage);
-  const contextBlock = buildContextBlock(history, settings.targetLanguage);
+  const f1 = settings.translationMode !== "off" &&
+    (settings.translationMode === "f1" || translationProfile === "f1");
+  const system = buildSystemPrompt(settings.targetLanguage, f1);
+  const contextBlock = f1
+    ? globalThis.LLMTranslationContext.sourceBlock(sourceContext, settings.f1ContextLines)
+    : buildContextBlock(history, settings.targetLanguage);
   const user = `${contextBlock}${lines.join("\n---\n")}`;
 
   const common = {
@@ -446,7 +454,8 @@ async function translate({ lines, history }) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "translate") {
-    translate({ lines: msg.lines, history: msg.history })
+    translate({ lines: msg.lines, history: msg.history,
+      translationProfile: msg.translationProfile, sourceContext: msg.sourceContext })
       .then((translations) => sendResponse({ ok: true, translations }))
       .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
     return true; // async

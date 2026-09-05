@@ -128,9 +128,23 @@
           <input id="targetLanguage" type="text" placeholder="如: 简体中文 / English / 日本語" />
         </div>
         <div class="row">
-          <label>上下文行数</label>
+          <label for="translationMode">F1 翻译增强</label>
+          <select id="translationMode">
+            <option value="auto">自动识别 F1（默认）</option>
+            <option value="f1">强制开启 F1 模式</option>
+            <option value="off">关闭</option>
+          </select>
+          <small class="hint">加入赛车术语和原文上下文，不增加合句等待。不适用于 Google Translate v2/v3。</small>
+        </div>
+        <div class="row">
+          <label for="f1ContextLines">F1 原文上下文</label>
+          <input id="f1ContextLines" type="number" min="0" max="8" />
+          <small class="hint">默认前 4 条，按视频时间选取；最多 1200 字符。会增加输入 token；设为 0 只使用术语增强。</small>
+        </div>
+        <div class="row">
+          <label>普通模式上下文行数</label>
           <input id="contextLines" type="number" min="0" max="20" />
-          <small class="hint">发送给模型的最近翻译行数，用于保持语气和代词一致。</small>
+          <small class="hint">发送给模型的最近翻译行数。F1 模式改用上面的原文上下文，不使用已翻译结果。</small>
         </div>
         <div class="row">
           <label>同时显示原文</label>

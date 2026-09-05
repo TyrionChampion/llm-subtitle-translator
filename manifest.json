@@ -55,7 +55,7 @@
         "https://tv.apple.com/*",
         "https://*.tver.jp/*"
       ],
-      "js": ["subtitle-reader.js", "content.js"],
+      "js": ["subtitle-reader.js", "translation-context.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle",
       "all_frames": true
