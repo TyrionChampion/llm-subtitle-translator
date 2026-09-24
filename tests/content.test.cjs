@@ -60,7 +60,7 @@ class Element {
 
 async function flush() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
 
-async function harness({ enabled = true, cues = [], time = 10, autoResponse = false, dialogOpen = false, showOriginal = false, channel = false, title = "", translationMode = "auto", f1ContextLines = 4 } = {}) {
+async function harness({ enabled = true, cues = [], time = 10, autoResponse = false, dialogOpen = false, showOriginal = false, channel = false, title = "", translationMode = "auto", f1ContextLines = 4, deadRuntime = null } = {}) {
   let now = 10000, nextTimer = 1;
   const intervals = new Map(), timeouts = new Map(), listeners = new Map();
   const requests = [], logs = [], storageListeners = [];
@@ -86,6 +86,24 @@ async function harness({ enabled = true, cues = [], time = 10, autoResponse = fa
   };
   const location = { href: "https://tv.apple.com/us/sporting-event/test", pathname: "/us/sporting-event/test", hostname: "tv.apple.com", origin: "https://tv.apple.com" };
   if (channel) Object.assign(location, { href: "https://tv.apple.com/us/channel/formula-1/test", pathname: "/us/channel/formula-1/test" });
+  // Kept as a named object so the fake can expose chrome.runtime.lastError the
+  // way Chrome does: readable inside the callback, gone afterwards.
+  const chromeRuntime = {
+    sendMessage(message, callback) {
+      if (message.type === "getSettings") { callback({ ...settings }); return; }
+      if (message.type !== "translate") throw new Error("Unexpected message");
+      // Models a page that still runs the pre-reload content script.
+      if (deadRuntime === "throw") throw new Error("Extension context invalidated.");
+      if (deadRuntime === "lastError") {
+        chromeRuntime.lastError = { message: "A listener indicated an asynchronous response by returning true, " +
+          "but the message channel closed before a response was received" };
+        try { callback(undefined); } finally { delete chromeRuntime.lastError; }
+        return;
+      }
+      requests.push({ message, callback });
+      if (autoResponse) queueMicrotask(() => callback({ ok: true, translations: ["中文：" + message.lines[0]] }));
+    },
+  };
   const context = {
     document, location, LLMSubtitleReader: Reader, LLMTranslationContext: TranslationContext, innerWidth: 1920, innerHeight: 1080,
     console: { log: (...args) => logs.push(args), error: (...args) => logs.push(args) },
@@ -101,14 +119,7 @@ async function harness({ enabled = true, cues = [], time = 10, autoResponse = fa
     setTimeout(fn, delay) { const id = nextTimer++; timeouts.set(id, { fn, at: now + delay }); return id; },
     clearTimeout(id) { timeouts.delete(id); },
     chrome: {
-      runtime: {
-        sendMessage(message, callback) {
-          if (message.type === "getSettings") { callback({ ...settings }); return; }
-          if (message.type !== "translate") throw new Error("Unexpected message");
-          requests.push({ message, callback });
-          if (autoResponse) queueMicrotask(() => callback({ ok: true, translations: ["中文：" + message.lines[0]] }));
-        },
-      },
+      runtime: chromeRuntime,
       storage: { onChanged: { addListener: (fn) => storageListeners.push(fn) } },
     },
   };
@@ -463,4 +474,44 @@ test("Apple native English suppresses the duplicate original row while MSE-only 
   assert.equal(mse.overlay().querySelector(".llm-subtitle-original").textContent, "MSE-only English");
   assert.equal(mse.translated(), "解析字幕翻译");
   assert.equal(mse.overlay().style.display, "flex");
+});
+
+// Reloading the extension does not re-inject content scripts into open tabs, so
+// the page keeps running the old script against a dead runtime port. That used
+// to surface only as per-cue "request dispatch failed / translation runtime
+// error" noise that looks like a translation bug.
+const refreshHints = (h) => h.logs.filter((args) => String(args[1]).includes("刷新页面"));
+
+test("a dead runtime stops retrying and tells the user to refresh the page", async () => {
+  const h = await harness({ deadRuntime: "throw", cues: [nativeCue("Hello world", 10, 20)] });
+  await h.poll(200);
+
+  assert.equal(refreshHints(h).length, 1, "the refresh hint is logged exactly once");
+  assert.equal(h.requests.length, 0, "nothing can reach the service worker");
+  assert.equal(h.translated(), "", "no translation is displayed while the runtime is dead");
+
+  // Later cues must not produce more dispatch errors or hint spam.
+  h.track.cues[0].text = "Another line";
+  await h.poll(200);
+  await h.poll(200);
+  assert.equal(refreshHints(h).length, 1, "the hint is not repeated for every cue");
+  assert.equal(
+    h.logs.filter((args) => String(args[1]).includes("request dispatch failed")).length,
+    0,
+    "an invalidated context is reported as such, not as a dispatch failure"
+  );
+});
+
+test("a closed message channel is reported once and stops further translation", async () => {
+  const h = await harness({ deadRuntime: "lastError", cues: [nativeCue("Hello world", 10, 20)] });
+  await h.poll(200);
+  await h.poll(200);
+
+  assert.equal(refreshHints(h).length, 1, "the refresh hint is logged exactly once");
+  assert.equal(h.translated(), "");
+  assert.equal(
+    h.logs.filter((args) => String(args[1]).includes("translation runtime error")).length,
+    0,
+    "a closed channel is reported as an invalidated context, not a runtime error"
+  );
 });

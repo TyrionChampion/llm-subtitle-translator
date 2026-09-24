@@ -114,7 +114,7 @@
 
   // Unconditional load banner so the user can verify injection from devtools.
   // Bump this when shipping a fix so the user can confirm the new code landed.
-  const BUILD = "2026-09-23.8-fullscreen-top-layer";
+  const BUILD = "2026-09-24.1-runtime-invalidated";
   console.log(
     `${DEBUG_PREFIX} content script loaded (build ${BUILD}) on ${HOST} ` +
       `(platform=${platform.name}, frame=${window.top === window ? "top" : "sub"})`
@@ -144,6 +144,30 @@
   let currentAnchor = null;
   let utteranceStartedAt = 0;
   const latencyStats = { sent: 0, failed: 0, superseded: 0, displayed: 0, late: 0 };
+
+  // A page that is already open keeps running the *old* content script after the
+  // extension is reloaded: its chrome.runtime port is dead, so every translate
+  // request fails with "Extension context invalidated". That looks exactly like
+  // "subtitles stopped working", so detect it once, stop retrying, and say what
+  // actually happened instead of spamming per-cue errors.
+  let runtimeGone = false;
+
+  function isRuntimeGone(error) {
+    const text = String((error && error.message) || error || "");
+    return /extension context invalidated|message channel closed|receiving end does not exist/i.test(text);
+  }
+
+  function noteRuntimeGone(where, error) {
+    if (runtimeGone) return;
+    runtimeGone = true;
+    console.log(
+      DEBUG_PREFIX,
+      `扩展上下文已失效（${where}）：扩展被重载后，已打开的标签页仍在运行旧的内容脚本，` +
+        "继续翻译已停止。请刷新页面 (F5) 恢复。" +
+        " / extension context invalidated: refresh this page (F5) to resume translation.",
+      String((error && error.message) || error || "")
+    );
+  }
 
   function isAppend(previous, next) {
     const a = normalize(previous), b = normalize(next);
@@ -181,7 +205,8 @@
       try { job.run(release); }
       catch (error) {
         latencyStats.failed++;
-        console.error(DEBUG_PREFIX, "request dispatch failed:", String(error));
+        if (isRuntimeGone(error)) noteRuntimeGone("dispatch", error);
+        else console.error(DEBUG_PREFIX, "request dispatch failed:", String(error));
         job.resolve("");
         release();
       }
@@ -808,6 +833,8 @@
 
   async function translateText(text, cue = null) {
     if (!settings?.enabled || !isPlayerPage()) return "";
+    // Nothing can reach the service worker any more; stop queueing work.
+    if (runtimeGone) return "";
     const generation = sessionGeneration;
     const normalized = normalize(text);
     if (!normalized) return "";
@@ -856,11 +883,15 @@
           const dt = Date.now() - t0;
           if (chrome.runtime.lastError) {
             latencyStats.failed++;
-            console.error(
-              DEBUG_PREFIX,
-              `translation runtime error after ${dt}ms:`,
-              chrome.runtime.lastError.message
-            );
+            const message = chrome.runtime.lastError.message;
+            if (isRuntimeGone(message)) noteRuntimeGone("response", message);
+            else {
+              console.error(
+                DEBUG_PREFIX,
+                `translation runtime error after ${dt}ms:`,
+                message
+              );
+            }
             resolve("");
             return;
           }
@@ -1381,7 +1412,21 @@
   // -------------- lifecycle --------------
   async function loadSettings() {
     settings = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: "getSettings" }, (s) => resolve(s || {}));
+      try {
+        chrome.runtime.sendMessage({ type: "getSettings" }, (s) => {
+          // Reading lastError also marks it handled, which keeps Chrome from
+          // logging "Unchecked runtime.lastError" for the stale-page case.
+          if (chrome.runtime.lastError && isRuntimeGone(chrome.runtime.lastError.message)) {
+            noteRuntimeGone("settings", chrome.runtime.lastError.message);
+          }
+          resolve(s || {});
+        });
+      } catch (error) {
+        // A dead context throws synchronously and would otherwise leave this
+        // promise pending forever, so the page would never finish starting up.
+        if (isRuntimeGone(error)) noteRuntimeGone("settings", error);
+        resolve({});
+      }
     });
   }
 
