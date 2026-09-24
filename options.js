@@ -45,6 +45,8 @@ async function load() {
   $("temperature").value = s.temperature ?? 0.2;
   $("targetLanguage").value = s.targetLanguage || "简体中文";
   $("contextLines").value = s.contextLines ?? 0;
+  $("translationMode").value = s.translationMode ?? "auto";
+  $("f1ContextLines").value = s.f1ContextLines ?? 4;
   $("showOriginal").checked = !!s.showOriginal;
   $("enabled").checked = !!s.enabled;
   $("debug").checked = !!s.debug;
@@ -158,6 +160,8 @@ bindText("customEndpoint", "customEndpoint");
 bindText("temperature", "temperature", (v) => Number(v));
 bindText("targetLanguage", "targetLanguage");
 bindText("contextLines", "contextLines", (v) => Number(v));
+bindSelect("translationMode", "translationMode");
+bindText("f1ContextLines", "f1ContextLines", (v) => Math.max(0, Math.min(8, Number(v) || 0)));
 bindCheckbox("showOriginal", "showOriginal");
 bindCheckbox("enabled", "enabled");
 bindCheckbox("debug", "debug");

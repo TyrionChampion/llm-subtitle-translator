@@ -1,6 +1,5 @@
 #llm-subtitle-overlay.llm-subtitle-overlay {
-  /* Position / sizing is set dynamically from JS based on the <video> rect —
-     fullscreen uses viewport coords, windowed tracks the video element. */
+  /* Position / sizing is set dynamically from JS based on the <video> rect. */
   position: fixed !important;
   right: auto !important;
   top: auto !important;
@@ -17,6 +16,17 @@
   font-family: "PingFang SC", "Helvetica Neue", Helvetica, "Segoe UI", Arial, sans-serif;
   text-align: center;
   user-select: none;
+  /* The overlay is a manual popover (see content.js). The browser paints it in
+     the top layer, which is what keeps it visible over a fullscreen player —
+     including when the fullscreen element is the <video> itself, whose child
+     nodes are never rendered. These resets neutralise the UA popover defaults
+     (opaque Canvas background, solid border, padding, `margin: auto`). */
+  margin: 0 !important;
+  border: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  overflow: visible !important;
+  color: #fff;
 }
 
 #llm-subtitle-overlay .llm-subtitle-translated {
@@ -56,8 +66,8 @@
   #llm-subtitle-overlay .llm-subtitle-original { font-size: 1rem; }
 }
 
-/* When page is in fullscreen, the overlay should still sit above the video */
-:fullscreen #llm-subtitle-overlay,
-:-webkit-full-screen #llm-subtitle-overlay {
-  bottom: 10vh;
-}
+/* Fullscreen needs no special-case rule here: the overlay is a top-layer
+   popover, and content.js re-raises it on every fullscreenchange and rewrites
+   `left`/`bottom` inline from the <video> rect. A `:fullscreen` descendant
+   selector would no longer match, because the overlay's DOM parent stays <html>
+   instead of being moved into the fullscreen element. */

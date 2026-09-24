@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LLM Subtitle Translator",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "用 Gemini / OpenAI / Claude 实时翻译 Netflix、Disney+、YouTube、Prime Video 等流媒体的内置字幕。",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
@@ -20,6 +20,7 @@
     "https://translation.googleapis.com/*",
     "https://oauth2.googleapis.com/*",
     "https://api.openai.com/*",
+    "https://api.deepseek.com/*",
     "https://api.anthropic.com/*"
   ],
   "background": {
@@ -55,7 +56,25 @@
         "https://tv.apple.com/*",
         "https://*.tver.jp/*"
       ],
-      "js": ["content.js"],
+      "js": ["subtitle-parser.js", "inject.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.netflix.com/*",
+        "https://*.disneyplus.com/*",
+        "https://*.hotstar.com/*",
+        "https://*.primevideo.com/*",
+        "https://*.amazon.com/*",
+        "https://*.youtube.com/*",
+        "https://*.hbomax.com/*",
+        "https://*.max.com/*",
+        "https://tv.apple.com/*",
+        "https://*.tver.jp/*"
+      ],
+      "js": ["subtitle-reader.js", "translation-context.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle",
       "all_frames": true
