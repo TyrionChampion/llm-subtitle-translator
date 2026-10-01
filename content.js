@@ -114,7 +114,7 @@
 
   // Unconditional load banner so the user can verify injection from devtools.
   // Bump this when shipping a fix so the user can confirm the new code landed.
-  const BUILD = "2026-09-24.1-runtime-invalidated";
+  const BUILD = "2026-09-24.2-bilingual-align";
   console.log(
     `${DEBUG_PREFIX} content script loaded (build ${BUILD}) on ${HOST} ` +
       `(platform=${platform.name}, frame=${window.top === window ? "top" : "sub"})`
@@ -473,11 +473,33 @@
     if (!v) return;
     const vr = v.getBoundingClientRect();
     if (vr.width < 100 || vr.height < 100) return;
-    const centerX = vr.left + vr.width / 2;
+
+    let centerX = vr.left + vr.width / 2;
     // Position the overlay near the bottom of the video, inset ~8% of its
     // height (matches the default 8vh look used in fullscreen).
-    const bottomOffset =
+    let bottomOffset =
       window.innerHeight - vr.bottom + Math.max(16, vr.height * 0.08);
+
+    // Apple TV draws the English line itself, at a position the player owns.
+    // Hang our Chinese block off that line so the two read as one bilingual
+    // subtitle instead of the English floating off to one side. Skipped while
+    // our own overlay renders the original row (that would stack a duplicate
+    // English under the player's), and while the overlay is hidden.
+    const anchor =
+      ownOriginalVisible || overlay.style.display === "none" ? null : nativeCueAnchor();
+    if (anchor) {
+      centerX = anchor.centerX;
+      const gap = 6;
+      const height = overlay.getBoundingClientRect().height;
+      // Directly below the player's line…
+      const below = window.innerHeight - anchor.bottom - gap - height;
+      // …unless that would push the block off the bottom of the screen, in
+      // which case sit just above it. Either way the two lines stay adjacent.
+      bottomOffset = below >= MIN_OVERLAY_BOTTOM
+        ? below
+        : Math.max(MIN_OVERLAY_BOTTOM, window.innerHeight - anchor.top + gap);
+    }
+
     overlay.style.setProperty("left", `${centerX}px`, "important");
     overlay.style.setProperty("bottom", `${bottomOffset}px`, "important");
     overlay.style.setProperty(
@@ -490,6 +512,7 @@
   function renderOverlay() {
     if (!settings?.enabled) {
       if (overlay) overlay.style.display = "none";
+      ownOriginalVisible = false;
       hideNativeSubtitles(false);
       return;
     }
@@ -501,6 +524,7 @@
       currentOriginal && shouldSkipTranslation(currentOriginal);
     if (isSkipping) {
       if (overlay) overlay.style.display = "none";
+      ownOriginalVisible = false;
       hideNativeSubtitles(false);
       return;
     }
@@ -545,6 +569,10 @@
       settings.showOriginal && currentOriginal && !duplicated && !nativeOriginalVisible
         ? "block"
         : "none";
+    // Remember whether this frame put English inside our own overlay; when it
+    // did, the player's native line is not the only English on screen and
+    // positionOverlayToVideo() must not anchor to it.
+    ownOriginalVisible = oEl.style.display !== "none";
     // Always hide the native subtitle while enabled — our overlay is the
     // single source of truth.
     hideNativeSubtitles(true);
@@ -628,8 +656,11 @@
     return false;
   }
 
-  function findByPlatformSelectors() {
-    if (!platform.containerSelectors.length) return "";
+  // The platform's own cue elements, when the platform paints captions in the
+  // DOM. Returned as elements rather than text because Apple TV keeps its
+  // native captions on screen and we align our block to the line it draws.
+  function findPlatformCueElements() {
+    if (!platform.containerSelectors.length) return [];
     const joined = platform.containerSelectors.join(", ");
     const all = [];
     try {
@@ -649,7 +680,7 @@
     );
     // Keep only leaves that are visible AND painted over a <video> region.
     const videos = getVideos();
-    const visible = leaves.filter((el) => {
+    return leaves.filter((el) => {
       const style = getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden") return false;
       if (parseFloat(style.opacity || "1") === 0) {
@@ -659,9 +690,12 @@
       }
       return isInsideVideoRegion(el, videos);
     });
+  }
+
+  function findByPlatformSelectors() {
     const seenText = new Set();
     const texts = [];
-    for (const el of visible) {
+    for (const el of findPlatformCueElements()) {
       const t = (el.textContent || "").replace(/\s+/g, " ").trim();
       if (!t) continue;
       if (seenText.has(t)) continue;
@@ -670,6 +704,34 @@
     }
     return texts.join("\n").trim();
   }
+
+  // Union rect (viewport coordinates) of the captions the platform draws itself.
+  //
+  // Apple TV is the case that matters: its subtitle menu shares the same class
+  // names as the rendered cues, so hiding them by selector also hides the menu
+  // (see hideNativeSubtitles). Instead of fighting the player we read where it
+  // puts the English line and hang our Chinese block off that. Read-only: no
+  // element of the player's DOM is modified.
+  function nativeCueAnchor() {
+    if (platform.name !== "appletv") return null;
+    let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+    for (const el of findPlatformCueElements()) {
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      left = Math.min(left, r.left);
+      right = Math.max(right, r.right);
+      top = Math.min(top, r.top);
+      bottom = Math.max(bottom, r.bottom);
+    }
+    if (!Number.isFinite(left) || right <= left || bottom <= top) return null;
+    return { left, right, top, bottom, centerX: (left + right) / 2 };
+  }
+
+  // Never let the anchored block fall off the bottom of the viewport.
+  const MIN_OVERLAY_BOTTOM = 8;
+  // True while our own overlay renders the original row: the native line is then
+  // not the only English on screen and anchoring would stack a duplicate under it.
+  let ownOriginalVisible = false;
 
   // Generic detection: find text rendered over a video element.
   // Heuristics used:

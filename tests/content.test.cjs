@@ -515,3 +515,35 @@ test("a closed message channel is reported once and stops further translation", 
     "a closed channel is reported as an invalidated context, not a runtime error"
   );
 });
+
+// Apple TV draws its own English line wherever the player chooses; our Chinese
+// block hangs off that line instead of the video centre so the two read as one
+// bilingual subtitle. The fake DOM gives a caption node cueRect (centerX 950)
+// and the video videoRect (centerX 960), which tells the two anchors apart.
+const playerCaption = () => {
+  const el = new Element("div", { class: "player-caption-text" });
+  el.textContent = "English line from the player";
+  return el;
+};
+
+test("Apple TV anchors the translated block to the caption the player draws", async () => {
+  const h = await harness({ cues: [nativeCue("English line from the player", 10, 20)] });
+  h.player.appendChild(playerCaption());
+  await h.poll(200);
+  assert.equal(h.overlay().style.left, "950px", "centred on the player's caption, not the video");
+});
+
+test("our own English row is not anchored to the player's caption", async () => {
+  // No showing TextTrack: the extension reads the DOM caption instead and
+  // renders both rows itself, so anchoring would stack a duplicate English.
+  const h = await harness({ cues: [], showOriginal: true });
+  h.track.mode = "hidden";
+  h.player.appendChild(playerCaption());
+  await h.poll(200);
+  assert.equal(
+    h.overlay().querySelector(".llm-subtitle-original").style.display,
+    "block",
+    "the overlay owns the English row in this case"
+  );
+  assert.equal(h.overlay().style.left, "960px", "stays centred on the video");
+});
