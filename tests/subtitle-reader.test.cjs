@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { readNative, isSubtitleElement } = require("../subtitle-reader.js");
+const { readNative, isSubtitleElement, cueText, createNativeBilingualRenderer } = require("../subtitle-reader.js");
 
 function cue(text, startTime = 1, endTime = 3) { return { text, startTime, endTime }; }
 function track(overrides = {}) {
@@ -13,6 +13,83 @@ function element(tagName = "DIV", attrs = {}, parentElement = null) {
     getAttribute(name) { return attrs[name] || null; },
   };
 }
+
+test("native bilingual rendering preserves markup, timing and position and restores exactly", () => {
+  const renderer = createNativeBilingualRenderer();
+  const c = Object.assign(cue('<i>Hello</i>\nworld'), { line: 0, position: 50 });
+  const v = video([track({ cues: [c] })]);
+  assert.equal(renderer.sync(v, "Hello\nworld", "你好 <世界> & 大家"), true);
+  assert.equal(c.text, '<i>Hello</i>\nworld\n你好 &lt;世界&gt; &amp; 大家');
+  assert.equal(cueText(c), "Hello\nworld");
+  assert.equal(readNative(v).text, "Hello\nworld");
+  assert.equal(c.line, 0);
+  assert.equal(c.position, 50);
+  assert.equal(c.startTime, 1);
+  assert.equal(c.endTime, 3);
+  renderer.sync(v, "Hello\nworld", "新版翻译");
+  assert.equal(c.text, '<i>Hello</i>\nworld\n新版翻译');
+  renderer.restore();
+  assert.equal(c.text, '<i>Hello</i>\nworld');
+});
+
+test("native bilingual cleanup follows live edits, cue gaps and track selection", () => {
+  const renderer = createNativeBilingualRenderer();
+  const c = cue("English");
+  const t = track({ cues: [c] });
+  const v = video([t]);
+  renderer.sync(v, "English", "中文");
+  c.text = "English updated";
+  assert.equal(cueText(c), "English updated");
+  renderer.restore();
+  assert.equal(c.text, "English updated", "do not undo a player edit");
+  renderer.sync(v, "English updated", "新译文");
+  t.mode = "disabled";
+  assert.equal(renderer.sync(v, "English updated", "新译文"), false);
+  assert.equal(c.text, "English updated");
+  assert.equal(t.mode, "disabled");
+  t.mode = "showing";
+  renderer.sync(v, "English updated", "新译文");
+  v.currentTime = 3;
+  assert.equal(renderer.sync(v, "English updated", "新译文"), false);
+  assert.equal(c.text, "English updated");
+});
+
+test("overlapping cues append a combined translation once and stale translations are rejected", () => {
+  const renderer = createNativeBilingualRenderer();
+  const first = cue("First"), second = cue("Second");
+  const v = video([track({ cues: [first, second] })]);
+  assert.equal(renderer.sync(v, "First\nSecond", "合并翻译"), true);
+  assert.equal(first.text, "First");
+  assert.equal(second.text, "Second\n合并翻译");
+  assert.equal(renderer.sync(v, "Old source", "过时译文"), false);
+  assert.equal(second.text, "Second");
+});
+
+test("read-only native cue text allows an overlay fallback", () => {
+  const renderer = createNativeBilingualRenderer();
+  const c = Object.freeze(cue("English"));
+  assert.equal(renderer.sync(video([track({ cues: [c] })]), "English", "中文"), false);
+  assert.equal(cueText(c), "English");
+});
+
+test("changed captions repaint once by reinserting the same cue, including restoration", () => {
+  const renderer = createNativeBilingualRenderer();
+  const c = cue("English");
+  let painted = c.text, added = 0;
+  const t = track({ cues: [c],
+    removeCue(value) { this.cues = this.cues.filter(item => item !== value); },
+    addCue(value) { this.cues.push(value); painted = value.text; added++; },
+  });
+  const v = video([t]);
+  renderer.sync(v, "English", "中文");
+  assert.equal(painted, "English\n中文");
+  renderer.sync(v, "English", "中文");
+  assert.equal(added, 1, "unchanged polls do not remove and reinsert cues");
+  renderer.restore();
+  assert.equal(painted, "English");
+  assert.equal(t.cues[0], c);
+  assert.equal(t.mode, "showing");
+});
 
 test("only selected showing subtitle/caption tracks count; never changes track modes", () => {
   const tracks = [track({ mode: "hidden", activeCues: [cue("Hidden")] }),

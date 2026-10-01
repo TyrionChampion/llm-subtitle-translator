@@ -114,7 +114,7 @@
 
   // Unconditional load banner so the user can verify injection from devtools.
   // Bump this when shipping a fix so the user can confirm the new code landed.
-  const BUILD = "2026-09-24.2-bilingual-align";
+  const BUILD = "2026-10-01.2-transparent-captions";
   console.log(
     `${DEBUG_PREFIX} content script loaded (build ${BUILD}) on ${HOST} ` +
       `(platform=${platform.name}, frame=${window.top === window ? "top" : "sub"})`
@@ -128,6 +128,8 @@
   let overlay = null;
   let currentOriginal = "";
   let currentTranslated = "";
+  const nativeBilingual = globalThis.LLMSubtitleReader.createNativeBilingualRenderer();
+  let nativeCaptionStyle = null;
   const cache = new Map();
   const history = [];
   const sourceTimeline = globalThis.LLMTranslationContext.createTimeline();
@@ -511,6 +513,8 @@
 
   function renderOverlay() {
     if (!settings?.enabled) {
+      nativeBilingual.restore();
+      styleNativeCaptions(null);
       if (overlay) overlay.style.display = "none";
       ownOriginalVisible = false;
       hideNativeSubtitles(false);
@@ -523,6 +527,7 @@
     const isSkipping =
       currentOriginal && shouldSkipTranslation(currentOriginal);
     if (isSkipping) {
+      nativeBilingual.restore();
       if (overlay) overlay.style.display = "none";
       ownOriginalVisible = false;
       hideNativeSubtitles(false);
@@ -561,8 +566,8 @@
     // hide the original row so the same line isn't shown twice.
     const duplicated =
       currentTranslated && currentTranslated === currentOriginal;
-    // Apple's native English CC stays visible. A second English row in our
-    // overlay wastes space and pushes the Chinese row up over the native text.
+    // Apple's native English CC stays visible. Keep the fallback overlay from
+    // duplicating it; syncNativeBilingual hides that overlay after appending.
     const nativeOriginalVisible = platform.name === "appletv" &&
       !!globalThis.LLMSubtitleReader.readNative(v).text;
     oEl.style.display =
@@ -573,11 +578,48 @@
     // did, the player's native line is not the only English on screen and
     // positionOverlayToVideo() must not anchor to it.
     ownOriginalVisible = oEl.style.display !== "none";
-    // Always hide the native subtitle while enabled — our overlay is the
-    // single source of truth.
+    // Other platforms use the overlay; Apple keeps the native caption renderer.
     hideNativeSubtitles(true);
     // Align overlay to the actual video element (not the page viewport).
     positionOverlayToVideo(v);
+    syncNativeBilingual(v);
+  }
+
+  function styleNativeCaptions(video) {
+    if (!video) {
+      nativeCaptionStyle?.remove();
+      return;
+    }
+    if (!nativeCaptionStyle) {
+      nativeCaptionStyle = document.createElement("style");
+      nativeCaptionStyle.id = "llm-subtitle-native-style";
+      nativeCaptionStyle.textContent = `
+        video::cue {
+          background: transparent !important;
+          text-shadow: -1px -1px 0 #000, 1px -1px 0 #000,
+            -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000 !important;
+        }
+        video::cue(*) { background: transparent !important; }
+        video::cue-region { background: transparent !important; }
+      `;
+    }
+    // Document CSS cannot reach a video inside the player's open shadow root.
+    const root = video.getRootNode?.() || document;
+    const host = root === document ? document.documentElement : root;
+    if (nativeCaptionStyle.parentNode !== host) host.appendChild(nativeCaptionStyle);
+  }
+
+  function syncNativeBilingual(video) {
+    if (platform.name !== "appletv") return;
+    styleNativeCaptions(settings?.enabled && isPlayerPage() ? video : null);
+    if (!settings?.enabled || !currentOriginal || shouldSkipTranslation(currentOriginal)) {
+      nativeBilingual.restore();
+      return;
+    }
+    // Native ::cue boxes live in browser shadow DOM; their screen position is
+    // not available to an overlay. Let the player paint both languages together.
+    const appended = nativeBilingual.sync(video, currentOriginal, currentTranslated);
+    if (overlay) overlay.style.display = appended ? "none" : "flex";
   }
 
   function hideNativeSubtitles(on) {
@@ -585,8 +627,7 @@
     let el = document.getElementById(styleId);
     // Apple TV uses broad subtitle/caption class names for both rendered cues
     // and its subtitle settings UI. Hiding those selectors also makes the
-    // language menu disappear, so keep Apple's native English captions visible
-    // and only add our translated overlay on top.
+    // language menu disappear, so keep Apple's native caption renderer visible.
     if (platform.name === "appletv") {
       if (el) el.remove();
       return;
@@ -1430,6 +1471,8 @@
       const text = native.text || (native.available ? "" : findByPlatformSelectors());
       if (text) handleCueChange(text);
       else if (!tickTimeSyncDisplay(video, native)) handleCueChange("");
+      // The player may replace a cue object without changing its source text.
+      syncNativeBilingual(video);
       // Re-align each tick so overlay follows the video through page scroll,
       // window resize, and windowed-player drags.
       positionOverlayToVideo(video);

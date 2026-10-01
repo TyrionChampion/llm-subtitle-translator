@@ -1,4 +1,4 @@
-/* Read native captions without changing the player's selected tracks. */
+/* Read and augment native captions without changing the selected tracks. */
 (function (root, factory) {
   const api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
@@ -32,7 +32,15 @@
     });
   }
 
+  // Translation must never feed back into detection, context or API requests.
+  const bilingualCues = new WeakMap();
+
   function cueText(cue) {
+    const saved = bilingualCues.get(cue);
+    if (saved && cue.text === saved.rendered) return saved.source;
+    if (saved && cue.text.startsWith(saved.rendered)) {
+      return cueText({ text: saved.raw + cue.text.slice(saved.rendered.length) });
+    }
     let text;
     try {
       if (typeof cue.getCueAsHTML === "function") {
@@ -53,6 +61,78 @@
   function currentCues(list, time) {
     return asArray(list).filter(cue => cue && Number.isFinite(cue.startTime)
       && Number.isFinite(cue.endTime) && cue.startTime <= time && time < cue.endTime);
+  }
+
+  function createNativeBilingualRenderer() {
+    const modified = new Map();
+    function setText(cue, text, track) {
+      if (cue.text === text) return;
+      const previous = cue.text;
+      cue.text = text;
+      // Chromium can retain an active cue's old display tree after text changes.
+      // Reinsert the same cue to repaint, preserving its timing and positioning.
+      if (typeof track?.removeCue === "function" && typeof track?.addCue === "function" &&
+          asArray(track.cues).includes(cue)) {
+        try {
+          track.removeCue(cue);
+          track.addCue(cue);
+        } catch (error) {
+          cue.text = previous;
+          if (!asArray(track.cues).includes(cue)) track.addCue(cue);
+          throw error;
+        }
+      }
+    }
+    function restoreCue(cue, saved) {
+      try {
+        // Live CC can rewrite a cue in place. Never overwrite the player's update.
+        if (cue.text.startsWith(saved.rendered)) {
+          setText(cue, saved.raw + cue.text.slice(saved.rendered.length), saved.track);
+        }
+      } catch (_) { /* Detached or read-only cue. */ }
+      bilingualCues.delete(cue);
+      modified.delete(cue);
+    }
+    function restore() {
+      for (const [cue, saved] of modified) restoreCue(cue, saved);
+    }
+    function sync(video, source, translation) {
+      const active = [];
+      const owners = new Map();
+      try {
+        for (const track of asArray(video?.textTracks)) {
+          if (track.mode !== "showing" || !["subtitles", "captions"].includes(track.kind)) continue;
+          let cues = currentCues(track.activeCues, video.currentTime);
+          if (!cues.length) cues = currentCues(track.cues, video.currentTime);
+          active.push(...cues.filter(cue => cueText(cue)));
+          for (const cue of cues) owners.set(cue, track);
+        }
+      } catch (_) { restore(); return false; }
+      const text = [...new Set(active.map(cueText))].join("\n");
+      const normalize = value => value.replace(/\s+/g, " ").trim();
+      // Append once, after the final source cue, even when a sentence spans cues.
+      const target = source && translation && translation !== source &&
+        normalize(text) === normalize(source) ? active.at(-1) : null;
+      for (const [cue, saved] of modified) {
+        if (cue !== target || cue.text !== saved.rendered) restoreCue(cue, saved);
+      }
+      if (!target || typeof target.text !== "string") return false;
+      const previous = modified.get(target);
+      const raw = previous ? previous.raw : target.text;
+      const original = previous ? previous.source : cueText(target);
+      // VTTCue.text is WebVTT, not HTML. Escape literal translation characters.
+      const escaped = translation.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const rendered = `${raw}\n${escaped}`;
+      try {
+        setText(target, rendered, owners.get(target));
+        if (target.text !== rendered) throw new Error("cue text is read-only");
+      } catch (_) { restore(); return false; }
+      const saved = { raw, source: original, rendered, track: owners.get(target) };
+      modified.set(target, saved);
+      bilingualCues.set(target, saved);
+      return true;
+    }
+    return { sync, restore };
   }
 
   function readNative(video) {
@@ -119,5 +199,5 @@
     return true;
   }
 
-  return { readNative, isSubtitleElement, cueText };
+  return { readNative, isSubtitleElement, cueText, createNativeBilingualRenderer };
 });

@@ -208,6 +208,8 @@ test("F1 continuous 100ms appends cannot starve translation dispatch", async () 
   assert.ok(h.requests.length >= 6, "periodically dispatch despite having no quiet gap");
   assert.ok(h.requests.length <= 12, "do not send every appended word");
   assert.ok(h.requests.at(-1).message.lines[0].length > 100);
+  assert.ok(h.requests.every(r => !r.message.lines[0].includes("中文")),
+    "player appends to cue.text must not feed the rendered translation back into requests");
 });
 
 test("F1 DOM-only appends preserve translated prefixes without native timing", async () => {
@@ -358,13 +360,14 @@ test("live player open at load handles native captions arriving later", async ()
 });
 const captureCue = (text, start = 10, end = 12) => ({ text, start, end, language: "eng", trackId: 7 });
 
-test("native cue requests one translation shared by prefetch and visible overlay", async () => {
+test("native cue requests one translation shared by prefetch and bilingual captions", async () => {
   const h = await harness({ cues: [nativeCue("Native English")] });
   assert.equal(h.requests.length, 1);
   assert.equal(h.requests[0].message.lines[0], "Native English");
   await h.respond(0, "原生字幕翻译");
   assert.equal(h.translated(), "原生字幕翻译");
-  assert.equal(h.overlay().style.display, "flex");
+  assert.equal(h.track.cues[0].text, "Native English\n原生字幕翻译");
+  assert.equal(h.overlay().style.display, "none");
   assert.equal(h.html.querySelector("#llm-subtitle-hide-native"), null, "Apple captions remain visible");
 });
 
@@ -380,10 +383,11 @@ test("selected native track gap clears display and late translation cannot resur
 test("turning the selected track off clears a previously visible translation", async () => {
   const h = await harness({ cues: [nativeCue("Turn off")] });
   await h.respond(0, "关闭前字幕");
-  assert.equal(h.overlay().style.display, "flex");
+  assert.equal(h.track.cues[0].text, "Turn off\n关闭前字幕");
   h.track.mode = "disabled";
   await h.poll();
   assert.equal(h.overlay().style.display, "none");
+  assert.equal(h.track.cues[0].text, "Turn off");
 });
 
 test("aligned MSE cues use offset and display while unaligned network cues never display by time", async () => {
@@ -459,12 +463,17 @@ test("opening a player dialog rehomes an existing unchanged cue on the next poll
   assert.equal(h.requests.length, 1, "rehome does not retransmit a subtitle");
 });
 
-test("Apple native English suppresses the duplicate original row while MSE-only originals remain available", async () => {
+test("Apple native captions contain both languages while MSE-only originals remain available", async () => {
   const native = await harness({ cues: [nativeCue("Visible native English")], showOriginal: true });
   await native.respond(0, "保留中文字幕");
   assert.equal(native.overlay().querySelector(".llm-subtitle-original").style.display, "none");
   assert.equal(native.translated(), "保留中文字幕");
-  assert.equal(native.overlay().style.display, "flex");
+  assert.equal(native.track.cues[0].text, "Visible native English\n保留中文字幕");
+  assert.equal(native.overlay().style.display, "none", "no separate Chinese block");
+  await native.poll(1200);
+  assert.equal(native.requests.length, 1, "appended Chinese is never retranslated");
+  await native.enable(false);
+  assert.equal(native.track.cues[0].text, "Visible native English", "disabling restores the source");
 
   const mse = await harness({ showOriginal: true });
   await mse.capture({ kind: "parsed", cues: [captureCue("MSE-only English")], ttml: [], offset: 0, timeAligned: true });
@@ -474,6 +483,22 @@ test("Apple native English suppresses the duplicate original row while MSE-only 
   assert.equal(mse.overlay().querySelector(".llm-subtitle-original").textContent, "MSE-only English");
   assert.equal(mse.translated(), "解析字幕翻译");
   assert.equal(mse.overlay().style.display, "flex");
+});
+
+test("replacement native cues receive the current translation without another request", async () => {
+  const h = await harness({ cues: [nativeCue("Same source", 10, 20)] });
+  const old = h.track.cues[0];
+  await h.respond(0, "相同原文");
+  h.track.cues = [nativeCue("Same source", 10, 20)];
+  await h.poll();
+  assert.equal(old.text, "Same source");
+  assert.equal(h.track.cues[0].text, "Same source\n相同原文");
+  assert.equal(h.overlay().style.display, "none");
+  assert.equal(h.requests.length, 1);
+  h.video.currentTime = 21;
+  await h.poll();
+  assert.equal(h.track.cues[0].text, "Same source");
+  assert.equal(h.overlay().style.display, "none");
 });
 
 // Reloading the extension does not re-inject content scripts into open tabs, so
