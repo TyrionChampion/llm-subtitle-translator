@@ -4,3 +4,13 @@ node_modules/
 .env
 .env.local
 *.zip
+
+# Real-Chrome fullscreen regression harness (verify.mjs / make-mutant.sh /
+# debug.mjs / real-site.mjs) plus its outputs: per-scenario screenshots,
+# results.json, temporary Chrome profiles, and mutant/ — a complete copy of the
+# extension with the top-layer fix deliberately disabled as a negative control.
+# Kept local on purpose: mutant/ is loadable and still contains the bug, so
+# selecting it in chrome://extensions by mistake would run the broken code, and
+# loading it alongside the real extension makes the two content scripts delete
+# each other's subtitle layer. The scripts regenerate everything.
+.verify/
